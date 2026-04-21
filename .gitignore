@@ -1,0 +1,22 @@
+# Build artefacts
+/bin/
+/dist/
+confluencer
+confluencer-*
+*.exe
+
+# Go workspace
+/vendor/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local environment
+.env
