@@ -177,13 +177,46 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Write .gitignore stub if it doesn't exist.
 	writeGitignoreStub(root)
 
+	// Create .confluencer/hooks/ with hook shims.
+	if err := writeHookShims(root); err != nil {
+		return fmt.Errorf("write hook shims: %w", err)
+	}
+
+	// Install hooks into .git/hooks/.
+	if err := installHooks(root, out); err != nil {
+		return fmt.Errorf("install hooks: %w", err)
+	}
+
 	fmt.Fprintf(out, "\nInitialised confluencer:\n")
 	fmt.Fprintf(out, "  Pages:       %d\n", fileCount)
 	fmt.Fprintf(out, "  Attachments: %d\n", attCount)
 	fmt.Fprintf(out, "  Config:      %s\n", configFile)
 	fmt.Fprintf(out, "  Index:       %s\n", indexFile)
+	fmt.Fprintf(out, "  Hooks:       .confluencer/hooks/ → .git/hooks/\n")
 	fmt.Fprintln(out, "\nReview the files, then git add and commit.")
 
+	return nil
+}
+
+// writeHookShims creates .confluencer/hooks/ and writes the Git hook shims.
+func writeHookShims(root string) error {
+	hooksDir := filepath.Join(root, ".confluencer", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return err
+	}
+
+	shims := map[string]string{
+		"pre-push":     "#!/bin/sh\nset -e\nconfluencer push\n",
+		"post-merge":   "#!/bin/sh\nset -e\nconfluencer pull\n",
+		"post-rewrite": "#!/bin/sh\nset -e\nconfluencer pull\n",
+	}
+
+	for name, content := range shims {
+		path := filepath.Join(hooksDir, name)
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -194,7 +227,7 @@ func writeGitignoreStub(root string) {
 	existing, _ := os.ReadFile(gitignorePath)
 	content := string(existing)
 
-	entries := []string{".env", ".confluencer-pending", ".confluencer/bin/"}
+	entries := []string{".env", ".confluencer-pending"}
 	var toAdd []string
 	for _, e := range entries {
 		if !strings.Contains(content, e) {

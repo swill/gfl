@@ -54,7 +54,7 @@ func TestWriteGitignoreStub(t *testing.T) {
 		t.Fatalf("read .gitignore: %v", err)
 	}
 	content := string(data)
-	for _, entry := range []string{".env", ".confluencer-pending", ".confluencer/bin/"} {
+	for _, entry := range []string{".env", ".confluencer-pending"} {
 		if !containsLine(content, entry) {
 			t.Errorf(".gitignore should contain %q: %q", entry, content)
 		}

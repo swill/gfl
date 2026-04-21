@@ -6,7 +6,7 @@
 
 The tool understands the hierarchical structure of a Confluence space and mirrors it as a directory tree of Markdown files. The mapping between Confluence pages and local files is derived automatically from this tree and maintained in a tracked index file. There is no manual per-file configuration.
 
-`confluencer` is maintained as its own standalone repository. Compiled binaries are distributed as GitHub release artifacts and consumed by documentation repositories via a bundled install script. Go source is never present in the consuming repository.
+`confluencer` is maintained as its own standalone repository. Compiled binaries are distributed as GitHub release artifacts. Developers install `confluencer` onto their PATH independently (e.g. via `go install`, downloading a release binary, or a package manager). Go source is never present in the consuming repository.
 
 ---
 
@@ -19,8 +19,8 @@ The tool understands the hierarchical structure of a Confluence space and mirror
 - **Git is not the enforced source of truth**: Either side (Git or Confluence) may receive edits, renames, additions, or deletions. The tooling reconciles both directions on every pull and push.
 - **Non-blocking on failure**: A Confluence write failure must never permanently block a developer from pushing to Git.
 - **Reduce developer-visible failure modes**: Unsupported constructs are preserved, not rejected. Ambiguous slug collisions are disambiguated deterministically, not flagged as errors. The developer is prompted to intervene only for genuinely ambiguous cases (content conflicts, orphaned pages).
-- **No external runtime dependencies**: The binary is self-contained. Consuming repositories require only the binary, a `.env` file with Confluence credentials, and a POSIX shell for hook shims.
-- **No Go toolchain required in consuming repositories**: Binaries are pre-compiled per platform and architecture and fetched via install and upgrade scripts.
+- **No external runtime dependencies**: The binary is self-contained. Consuming repositories require only `confluencer` on the developer's PATH, a `.env` file with Confluence credentials, and a POSIX shell for hook shims.
+- **No Go toolchain required in consuming repositories**: Developers install `confluencer` independently (pre-compiled binaries, `go install`, or package manager). The consuming repository contains only configuration and hook shims.
 
 ---
 
@@ -35,7 +35,7 @@ confluencer/
     init.go           # populate a git repo from an existing Confluence tree
     push.go           # push orchestration (pre-push hook)
     pull.go           # pull orchestration (post-merge + post-rewrite hooks)
-    install.go        # writes hook shims into .git/hooks/
+    install.go        # copies hook shims from .confluencer/hooks/ into .git/hooks/
     status.go         # reports pending Confluence writes and orphan warnings
   lexer/
     normalise.go      # Markdown normalisation rules (see Markdown Normalisation)
@@ -81,17 +81,10 @@ The lexer package owns both the conversion functions and `slugify` because slugi
 ```
 <repo-root>/
   .confluencer/
-    bin/                          # gitignored — populated by install.sh
-      confluencer-linux-amd64
-      confluencer-darwin-amd64
-      confluencer-darwin-arm64
-      confluencer-windows-amd64.exe
-    install.sh                    # tracked — detects OS/arch, fetches binary
-    upgrade.sh                    # tracked — re-fetches latest binary release
     hooks/
-      pre-push                    # tracked — shell shim
-      post-merge                  # tracked — shell shim
-      post-rewrite                # tracked — shell shim
+      pre-push                    # tracked — shell shim, created by confluencer init
+      post-merge                  # tracked — shell shim, created by confluencer init
+      post-rewrite                # tracked — shell shim, created by confluencer init
 
   docs/                           # local root (configured in .confluencer.json)
     index.md                      # content of the Confluence root anchor page
@@ -108,8 +101,7 @@ The lexer package owns both the conversion functions and `slugify` because slugi
   .confluencer-index.json         # tracked — stable ID-to-path index (see Index File)
   .env                            # gitignored — Confluence credentials
   .confluencer-pending            # gitignored — NDJSON queue of failed writes
-  .gitignore                      # must include: .env, .confluencer-pending,
-                                  #   .confluencer/bin/
+  .gitignore                      # must include: .env, .confluencer-pending
 ```
 
 ---
@@ -570,9 +562,11 @@ confluencer init --page-id <root-page-id> [--local-root <path>]
 6. Download all attachments to `_attachments/<page-path>/`.
 7. Write `.confluencer.json` including the cached space key.
 8. Write `.confluencer-index.json`.
-9. Append to `.gitignore` if entries for `.env`, `.confluencer-pending`, and `.confluencer/bin/` are not already present.
-10. Print a summary.
-11. Do not make any Git commits. Leave staging to the developer.
+9. Append to `.gitignore` if entries for `.env` and `.confluencer-pending` are not already present.
+10. Create `.confluencer/hooks/` with hook shims for `pre-push`, `post-merge`, and `post-rewrite`.
+11. Install hooks into `.git/hooks/` (same operation as `confluencer install`).
+12. Print a summary.
+13. Do not make any Git commits. Leave staging to the developer.
 
 If `.confluencer.json` already exists, exit with an error. If a local `.md` already exists at a path init would write to, the file is overwritten with the Confluence content (no three-way merge is performed during init).
 
@@ -821,48 +815,36 @@ The `confluencer` source repository publishes pre-compiled binaries as GitHub re
 - `confluencer-darwin-arm64`
 - `confluencer-windows-amd64.exe`
 
-### `install.sh` (tracked at `.confluencer/install.sh`)
-
-1. Detect OS (`uname -s`) and architecture (`uname -m`).
-2. Determine the correct binary name for the platform.
-3. Fetch the latest release binary from the `confluencer` GitHub releases API.
-4. Write to `.confluencer/bin/confluencer` (or `.exe` on Windows) and mark executable.
-5. Invoke `confluencer install` to write hook shims into `.git/hooks/`.
-
-### `upgrade.sh` (tracked at `.confluencer/upgrade.sh`)
-
-Same fetch logic as `install.sh`. Overwrites the existing binary. Does not re-run hook installation — the shims are stable and resolve the binary path at runtime.
+Developers install `confluencer` onto their PATH independently of any consuming repository. Supported methods include downloading a release binary, `go install github.com/swill/confluencer@latest`, or a package manager. The consuming repository does not bundle or manage the binary — it only contains configuration and hook shims.
 
 ### Hook shims (tracked at `.confluencer/hooks/`)
+
+Created automatically by `confluencer init`. The shims invoke `confluencer` from the developer's PATH.
 
 **`pre-push`:**
 ```sh
 #!/bin/sh
 set -e
-REPO_ROOT=$(git rev-parse --show-toplevel)
-"$REPO_ROOT/.confluencer/bin/confluencer" push
+confluencer push
 ```
 
 **`post-merge`:**
 ```sh
 #!/bin/sh
 set -e
-REPO_ROOT=$(git rev-parse --show-toplevel)
-"$REPO_ROOT/.confluencer/bin/confluencer" pull
+confluencer pull
 ```
 
 **`post-rewrite`:**
 ```sh
 #!/bin/sh
 set -e
-# post-rewrite receives a "command" argument ("rebase" or "amend") — we sync on both.
-REPO_ROOT=$(git rev-parse --show-toplevel)
-"$REPO_ROOT/.confluencer/bin/confluencer" pull
+confluencer pull
 ```
 
 ### `confluencer install`
 
-Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-merge`, and `.confluencer/hooks/post-rewrite` into `.git/hooks/` and marks them executable. The shims resolve the binary path at runtime, so subsequent `upgrade.sh` runs do not require re-installation. Idempotent — safe to run multiple times.
+Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-merge`, and `.confluencer/hooks/post-rewrite` into `.git/hooks/` and marks them executable. Idempotent — safe to run multiple times. Used by developers who clone an existing confluencer-managed repository and need to activate the hooks locally.
 
 ---
 
@@ -870,8 +852,8 @@ Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-me
 
 | Command | Description |
 |---|---|
-| `confluencer init --page-id <id> [--local-root <path>]` | Populate local repo from existing Confluence tree. Writes `.confluencer.json` (including cached space key) and `.confluencer-index.json`. Does not commit. |
-| `confluencer install` | Write hook shims for `pre-push`, `post-merge`, and `post-rewrite` into `.git/hooks/`. |
+| `confluencer init --page-id <id> [--local-root <path>]` | Populate local repo from existing Confluence tree. Writes `.confluencer.json`, `.confluencer-index.json`, `.confluencer/hooks/`, and installs hooks into `.git/hooks/`. Does not commit. |
+| `confluencer install` | Copy hook shims from `.confluencer/hooks/` into `.git/hooks/`. Used after cloning an existing confluencer-managed repo. |
 | `confluencer push` | Invoked by pre-push hook. Write changed, added, renamed, and deleted Markdown to Confluence. Update index. Drain `.confluencer-pending` first. |
 | `confluencer push --retry` | Drain `.confluencer-pending` outside of a Git push. |
 | `confluencer pull` | Invoked by post-merge and post-rewrite. Fetch Confluence tree, apply typed change set, commit as `chore(sync): confluence`. |
@@ -879,7 +861,27 @@ Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-me
 
 ---
 
-## Developer Onboarding (New Clone)
+## Developer Onboarding
+
+### First-time setup (new repo, no existing confluencer config)
+
+```sh
+# Ensure confluencer is on your PATH (e.g. go install, download release binary)
+cd <repo>
+
+# Populate credentials
+cp .env.example .env
+# Edit .env — set CONFLUENCE_BASE_URL, CONFLUENCE_USER, CONFLUENCE_API_TOKEN
+
+# Initialise: fetches Confluence tree, writes config, index, hooks
+confluencer init --page-id <root-page-id>
+
+# Review and commit the generated files
+git add .
+git commit -m "initialise confluencer"
+```
+
+### Cloning an existing confluencer-managed repo
 
 ```sh
 git clone <repo>
@@ -889,11 +891,11 @@ cd <repo>
 cp .env.example .env
 # Edit .env — set CONFLUENCE_BASE_URL, CONFLUENCE_USER, CONFLUENCE_API_TOKEN
 
-# Install confluencer binary and Git hooks
-./.confluencer/install.sh
+# Install Git hooks (hook shims are already tracked in .confluencer/hooks/)
+confluencer install
 ```
 
-After this, all `git pull`, `git pull --rebase`, `git merge`, `git rebase`, and `git push` operations automatically sync with Confluence. No further configuration is required.
+After either path, all `git pull`, `git pull --rebase`, `git merge`, `git rebase`, and `git push` operations automatically sync with Confluence. No further configuration is required.
 
 ---
 

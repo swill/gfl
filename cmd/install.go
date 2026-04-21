@@ -31,7 +31,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	return installHooks(root, cmd.OutOrStdout())
+}
 
+// installHooks copies hook shims from .confluencer/hooks/ into .git/hooks/.
+func installHooks(root string, out io.Writer) error {
 	srcDir := filepath.Join(root, ".confluencer", "hooks")
 	dstDir := filepath.Join(root, ".git", "hooks")
 
@@ -46,7 +50,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := copyFile(src, dst, 0o755); err != nil {
 			return fmt.Errorf("install %s hook: %w", name, err)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "installed %s → .git/hooks/%s\n", name, name)
+		fmt.Fprintf(out, "installed %s → .git/hooks/%s\n", name, name)
 	}
 
 	return nil
