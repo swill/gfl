@@ -858,6 +858,7 @@ Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-me
 | `confluencer push --retry` | Drain `.confluencer-pending` outside of a Git push. |
 | `confluencer pull` | Invoked by post-merge and post-rewrite. Fetch Confluence tree, apply typed change set, commit as `chore(sync): confluence`. |
 | `confluencer status` | Report pending writes, orphaned pages, and pending deletions. |
+| `confluencer version` | Print version, commit, and build date. |
 
 ---
 
