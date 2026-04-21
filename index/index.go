@@ -17,6 +17,7 @@ type Entry struct {
 	Title        string `json:"confluence_title"`
 	LocalPath    string `json:"local_path"`
 	ParentPageID string `json:"parent_page_id,omitempty"`
+	Version      int    `json:"version,omitempty"`
 }
 
 // indexFile is the on-disk JSON shape.
@@ -164,6 +165,17 @@ func (idx *Index) UpdateTitle(pageID, newTitle string) bool {
 		return false
 	}
 	e.Title = newTitle
+	return true
+}
+
+// UpdateVersion changes the Confluence version number for an existing entry.
+// Returns false if the page ID is not in the index.
+func (idx *Index) UpdateVersion(pageID string, version int) bool {
+	e, ok := idx.byPageID[pageID]
+	if !ok {
+		return false
+	}
+	e.Version = version
 	return true
 }
 

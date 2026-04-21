@@ -23,24 +23,38 @@ type FileDiff struct {
 	OldPath string // previous path (renames only)
 }
 
-// emptyTree is the well-known SHA of an empty tree object in Git.
-// Used as the base when diffing from nothing (e.g. new branch).
-const emptyTree = "4b825dc642cb6eb9a060e54bf899d15363d7aa7d"
-
 // DiffRange returns file changes between two commits with rename detection.
-// If baseSHA is empty or the zero SHA, diffs against the empty tree.
+// If baseSHA is empty or the zero SHA, diffs against an empty tree.
 func DiffRange(repoDir, baseSHA, headSHA string) ([]FileDiff, error) {
 	base := baseSHA
 	if base == "" || base == zeroSHA {
-		base = emptyTree
+		var err error
+		base, err = ensureEmptyTree(repoDir)
+		if err != nil {
+			return nil, fmt.Errorf("create empty tree for diff: %w", err)
+		}
 	}
-	cmd := exec.Command("git", "diff", "--name-status", "-M", base+".."+headSHA)
+	cmd := exec.Command("git", "diff", "--name-status", "-M", base, headSHA)
 	cmd.Dir = repoDir
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("git diff %s..%s: %w", base, headSHA, err)
+		return nil, fmt.Errorf("git diff %s %s: %s: %w", base, headSHA, strings.TrimSpace(string(out)), err)
 	}
 	return parseDiffOutput(string(out))
+}
+
+// ensureEmptyTree writes an empty tree object into the repo's object store
+// and returns its hash. This avoids relying on the well-known empty tree SHA
+// existing in the repo, which is not guaranteed across all Git configurations.
+func ensureEmptyTree(repoDir string) (string, error) {
+	cmd := exec.Command("git", "hash-object", "-t", "tree", "-w", "--stdin")
+	cmd.Dir = repoDir
+	cmd.Stdin = strings.NewReader("")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git hash-object -t tree -w: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // DiffCommit returns file changes for a single commit with rename detection.
@@ -49,9 +63,9 @@ func DiffCommit(repoDir, commitSHA string) ([]FileDiff, error) {
 	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "-r",
 		"--name-status", "-M", "--root", commitSHA)
 	cmd.Dir = repoDir
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("git diff-tree %s: %w", commitSHA, err)
+		return nil, fmt.Errorf("git diff-tree %s: %s: %w", commitSHA, strings.TrimSpace(string(out)), err)
 	}
 	return parseDiffOutput(string(out))
 }

@@ -97,6 +97,32 @@ func CommitMessage(repoDir, commitSHA string) (string, error) {
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
+// LastSyncCommit returns the SHA of the most recent sync commit on the current
+// branch, or empty string if none exists.
+func LastSyncCommit(repoDir string) (string, error) {
+	cmd := exec.Command("git", "log",
+		"--grep=^"+SyncPrefix,
+		"--format=%H",
+		"-1")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git log for last sync commit: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// HeadSHA returns the SHA of the current HEAD commit.
+func HeadSHA(repoDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // splitLines splits on newlines, discarding empty trailing entries.
 func splitLines(s string) []string {
 	s = strings.TrimSpace(s)

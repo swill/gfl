@@ -152,19 +152,22 @@ The index is committed as part of every sync commit so that any developer who cl
       "confluence_page_id": "123456789",
       "confluence_title": "Root Page",
       "local_path": "docs/index.md",
-      "parent_page_id": null
+      "parent_page_id": null,
+      "version": 5
     },
     {
       "confluence_page_id": "234567890",
       "confluence_title": "Architecture",
       "local_path": "docs/architecture/index.md",
-      "parent_page_id": "123456789"
+      "parent_page_id": "123456789",
+      "version": 12
     },
     {
       "confluence_page_id": "345678901",
       "confluence_title": "Database Design",
       "local_path": "docs/architecture/database-design.md",
-      "parent_page_id": "234567890"
+      "parent_page_id": "234567890",
+      "version": 3
     }
   ]
 }
@@ -172,9 +175,11 @@ The index is committed as part of every sync commit so that any developer who cl
 
 `parent_page_id` is stored so that push-direction tree reconstruction (e.g. creating a new child page) does not need to re-derive parentage from the filesystem.
 
+`version` is the Confluence page version number at the time of the last sync. During pull, the tool compares each page's current Confluence version against the stored version. If they differ, the page body is fetched and compared to detect content changes. This avoids fetching bodies for pages that haven't changed. The version is updated in the index after every successful pull.
+
 The index must be updated atomically with any file operation it describes. A sync commit that renames a file must also update the index entry for that file in the same commit. The index and the filesystem must never be out of sync at any committed state.
 
-The index does **not** store content hashes or a sync baseline. The baseline for three-way merge is obtained via `git show` at the most recent `chore(sync): confluence` commit that touched the file in question (see Concurrent Writer / Version Conflict Resolution).
+The three-way merge baseline is not stored in the index. It is obtained via `git show` at the most recent `chore(sync): confluence` commit that touched the file in question (see Concurrent Writer / Version Conflict Resolution).
 
 ---
 
@@ -483,19 +488,26 @@ To cover the full developer workflow (including `git pull --rebase` and fast-for
 
 ### `pre-push` hook → `confluencer push`
 
-Fires before Git transmits commits to the remote. Responsible for writing Markdown changes to Confluence.
+Fires before Git transmits commits to the remote. Also works when invoked directly as `confluencer push` (without a Git push in progress).
+
+**Commit range detection:**
+
+`confluencer push` supports two invocation modes:
+
+- **Hook mode** (stdin is a pipe from Git): parses pre-push stdin to identify the commit range (format: `<local-ref> <local-sha1> <remote-ref> <remote-sha1>`). Skip delete-branch refs.
+- **Direct mode** (stdin is a terminal): finds the most recent `chore(sync): confluence` commit on the current branch and diffs from there to HEAD. If no sync commit exists, diffs from the beginning of history. This allows `confluencer push` to work without a Git remote configured.
 
 **Sequence:**
 
 1. Drain `.confluencer-pending` first — retry queued entries, remove successes, update failures.
 2. If `--retry` flag is set, stop here (drain-only mode).
-3. Parse pre-push stdin to identify the range of commits being pushed (format: `<local-ref> <local-sha1> <remote-ref> <remote-sha1>`). Skip delete-branch refs.
-4. For each ref, compute the range diff to identify `.md` files that were added, modified, renamed, or deleted.
+3. Detect invocation mode (terminal vs pipe) and compute commit range(s) as described above.
+4. For each range, compute the diff to identify `.md` files that were added, modified, renamed, or deleted.
 5. Filter out any `.md` file whose most recent modifying commit in the range carries the sync marker (`chore(sync): confluence`) in its message. These files' Confluence representations were already written when that content first entered the repo.
 6. Process each diff by its action type:
    - **Deleted** (`D`): look up page ID in index, `DELETE /rest/api/content/{id}`, remove index entry. Already-deleted pages (404) are treated as success.
    - **Renamed** (`R`): apply the Title Stability Rule to decide whether a title change is needed. Fetch current page for version number. Convert local content via `md_to_cf`. `PUT` with new title, body, and parent ID (derived from directory structure). Update index entry with new path, title, and parent.
-   - **Added** (`A`): convert local content via `md_to_cf`. Derive parent page ID from the directory's `index.md` entry (falling back to root page). `POST /rest/api/content` to create the page. Record new page ID in the index.
+   - **Added** (`A`): if the file is already tracked in the index (e.g. created by `confluencer init`), treat as a content update. Otherwise, convert local content via `md_to_cf`, derive parent page ID from the directory's `index.md` entry (falling back to root page), `POST /rest/api/content` to create the page, and record new page ID in the index.
    - **Modified** (`M`): convert local content via `md_to_cf`. Fetch current page for version number. `PUT /rest/api/content/{id}` with version + 1. On 409, enter the three-way merge algorithm (see Concurrent Writer / Version Conflict Resolution).
 7. On unrecoverable failure per item, append to `.confluencer-pending`, warn on stderr, continue.
 8. Save the updated index.
@@ -515,18 +527,19 @@ Fires after `git rebase` and `git commit --amend`. Runs the same pull logic so t
 
 Invoked by both `post-merge` and `post-rewrite` (and `confluencer pull` directly):
 
-1. Acquire a short-lived file lock (`.confluencer/.pull.lock`) to prevent concurrent post-merge + post-rewrite double-fires. If lock is held, exit 0 silently — the holder will do the work.
-2. Fetch the full Confluence page tree rooted at `confluence_root_page_id` via the REST API.
+1. Acquire a short-lived file lock (`.confluencer/.pull.lock`) to prevent concurrent post-merge + post-rewrite double-fires. If lock is held, exit 0 silently — the holder will do the work. When invoked directly (not from a hook), a stale lock from a crashed run is removed and retried.
+2. Fetch the full Confluence page tree rooted at `confluence_root_page_id` via the REST API (structure only — bodies are not fetched at this stage).
 3. Load `.confluencer-index.json`.
-4. Compute the typed change set (see Typed change set table).
-5. Resolve each change:
+4. Compute the structural change set (see Typed change set table) — covers creates, deletes, renames, moves, promotions, and demotions.
+5. Detect content changes via version comparison: for each page in the tree that has no structural change, compare the Confluence version number against the version stored in the index. For pages with a version mismatch, fetch the body individually, convert via `cf_to_md`, and compare against the local file. Only pages with actual content differences are added as `content_changed` entries.
+6. Resolve each change:
    - `deleted`: remove files and index entries.
    - `renamed_in_place` / `moved` / `ancestor_renamed` / `promoted` / `demoted`: plan two-phase renames, execute `git mv`s, move attachments.
    - `content_changed`: write new Markdown. If the local file has uncommitted changes, run the three-way merge (same algorithm as push 409) using the Git-backed baseline.
    - `created`: write new file at computed path, add index entry.
    - `orphaned` / `missing_unknown`: log warnings, take no action.
 6. Download any new or changed attachments to `_attachments/<page-path>/`.
-7. Update the index.
+7. Update the index (including version numbers for all pages in the tree).
 8. If the change set is non-empty:
    - `git add` all changed, renamed, new, and deleted files plus attachments and the updated index.
    - `git commit -m "chore(sync): confluence"`.

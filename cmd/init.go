@@ -115,6 +115,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Title:        n.Title,
 			LocalPath:    localPath,
 			ParentPageID: n.ParentPageID,
+			Version:      n.Version,
 		})
 
 		fileCount++

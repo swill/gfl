@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,9 +22,10 @@ var pushRetry bool
 var pushCmd = &cobra.Command{
 	Use:   "push",
 	Short: "Write changed, added, renamed, and deleted Markdown files to Confluence",
-	Long: `Invoked by the pre-push Git hook. Parses pre-push stdin to identify
-the commit range, drains the pending queue, then processes deletions, renames,
-creates, content updates, and attachment uploads against Confluence.`,
+	Long: `Push local Markdown changes to Confluence. When invoked by the pre-push
+Git hook, parses stdin to identify the commit range. When run directly, scans
+commits since the last sync for changes. In both cases, drains the pending
+queue first, then processes deletions, renames, creates, and content updates.`,
 	RunE: runPush,
 }
 
@@ -67,34 +69,71 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if pushRetry {
-		// --retry mode: only drain pending, don't process new commits.
+		fmt.Fprintf(out, "[confluencer] done (retry only)\n")
 		return nil
 	}
 
-	// Parse pre-push stdin to identify the commit range.
-	refs, err := gitutil.ParsePushRefs(os.Stdin)
-	if err != nil {
-		return fmt.Errorf("parse push refs: %w", err)
+	// Determine commit ranges to scan for .md changes.
+	type commitRange struct{ base, head string }
+	var ranges []commitRange
+
+	if stdinIsTerminal() {
+		// Direct invocation — compute range from last sync commit to HEAD.
+		fmt.Fprintf(out, "[confluencer] scanning for changes since last sync...\n")
+		head, err := gitutil.HeadSHA(root)
+		if err != nil {
+			return fmt.Errorf("get HEAD: %w", err)
+		}
+		base, err := gitutil.LastSyncCommit(root)
+		if err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: find last sync commit: %v\n", err)
+			base = ""
+		}
+		if base == head {
+			fmt.Fprintf(out, "[confluencer] no changes since last sync\n")
+			return nil
+		}
+		ranges = append(ranges, commitRange{base: base, head: head})
+	} else {
+		// Pre-push hook — parse refs from stdin.
+		refs, err := gitutil.ParsePushRefs(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("parse push refs: %w", err)
+		}
+		for _, ref := range refs {
+			if gitutil.IsDeleteBranch(ref) {
+				continue
+			}
+			ranges = append(ranges, commitRange{base: ref.RemoteSHA, head: ref.LocalSHA})
+		}
 	}
 
-	for _, ref := range refs {
-		if gitutil.IsDeleteBranch(ref) {
-			continue
-		}
-
-		baseSHA := ref.RemoteSHA
-		headSHA := ref.LocalSHA
-
-		// Get all .md file changes in the range.
-		diffs, err := gitutil.DiffRange(root, baseSHA, headSHA)
+	totalProcessed := 0
+	for _, r := range ranges {
+		diffs, err := gitutil.DiffRange(root, r.base, r.head)
 		if err != nil {
 			fmt.Fprintf(out, "[confluencer] WARNING: diff range: %v\n", err)
 			continue
 		}
 		mdDiffs := gitutil.FilterMd(diffs)
+		mdDiffs = filterNonSyncDiffs(root, mdDiffs, r.base, r.head)
 
-		// Filter out files whose most recent commit is a sync commit.
-		mdDiffs = filterNonSyncDiffs(root, mdDiffs, baseSHA, headSHA)
+		if len(mdDiffs) == 0 {
+			continue
+		}
+
+		// Sort so index.md files are processed before siblings — ensures parent
+		// pages exist in the index before child pages look them up.
+		sort.Slice(mdDiffs, func(i, j int) bool {
+			iIdx := strings.HasSuffix(mdDiffs[i].Path, "/index.md")
+			jIdx := strings.HasSuffix(mdDiffs[j].Path, "/index.md")
+			if iIdx != jIdx {
+				return iIdx
+			}
+			return mdDiffs[i].Path < mdDiffs[j].Path
+		})
+
+		fmt.Fprintf(out, "[confluencer] found %d .md file(s) to push\n", len(mdDiffs))
 
 		for _, d := range mdDiffs {
 			switch d.Action {
@@ -105,11 +144,16 @@ func runPush(cmd *cobra.Command, args []string) error {
 				pushRename(client, idx, cfg, d, pendingPath, root, out)
 
 			case gitutil.ActionAdded:
-				pushCreate(client, idx, cfg, d, pendingPath, root, out)
+				if _, ok := idx.ByPath(d.Path); ok {
+					pushUpdate(client, idx, cfg, d, pendingPath, root, out)
+				} else {
+					pushCreate(client, idx, cfg, d, pendingPath, root, out)
+				}
 
 			case gitutil.ActionModified:
 				pushUpdate(client, idx, cfg, d, pendingPath, root, out)
 			}
+			totalProcessed++
 		}
 	}
 
@@ -118,7 +162,23 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("save index: %w", err)
 	}
 
+	if totalProcessed == 0 {
+		fmt.Fprintf(out, "[confluencer] no changes to push\n")
+	} else {
+		fmt.Fprintf(out, "[confluencer] done — %d file(s) processed\n", totalProcessed)
+	}
+
 	return nil
+}
+
+// stdinIsTerminal returns true if stdin is connected to a terminal (interactive),
+// as opposed to a pipe (e.g. from a Git hook).
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // filterNonSyncDiffs removes diffs where the file's most recent modifying
@@ -224,7 +284,7 @@ func pushRename(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 	}
 
 	// Determine new parent from directory structure.
-	newParentID := resolveParentFromPath(idx, d.Path, cfg.LocalRoot)
+	newParentID := ensureParentPages(client, idx, cfg, d.Path, root, out)
 
 	// Read local content for the renamed file.
 	content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(d.Path)))
@@ -276,11 +336,7 @@ func pushCreate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 	}
 
 	title := lexer.ReverseSlugify(filepath.Base(d.Path))
-	parentID := resolveParentFromPath(idx, d.Path, cfg.LocalRoot)
-	if parentID == "" {
-		// Fall back to root page.
-		parentID = cfg.RootPageID
-	}
+	parentID := ensureParentPages(client, idx, cfg, d.Path, root, out)
 
 	page, err := client.CreatePage(cfg.SpaceKey, parentID, title, storageXML)
 	if err != nil {
@@ -421,16 +477,59 @@ func handleConflict(client *api.Client, root, path, oursXML string, entry index.
 	return mergedXML, true
 }
 
-// resolveParentFromPath determines the parent page ID from the file's directory.
-func resolveParentFromPath(idx *index.Index, filePath, localRoot string) string {
+// ensureParentPages walks up the directory tree from filePath to localRoot,
+// creating intermediate Confluence pages (and local index.md files) for any
+// directory that doesn't already have a corresponding page in the index.
+// Returns the page ID of the immediate parent, or cfg.RootPageID if the file
+// sits directly in the local root.
+func ensureParentPages(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, filePath, root string, out io.Writer) string {
+	localRoot := strings.TrimSuffix(cfg.LocalRoot, "/")
+
 	dir := filepath.Dir(filePath)
-	// Look for index.md in the parent directory → that's the parent page.
-	parentIndexPath := dir + "/index.md"
-	if entry, ok := idx.ByPath(parentIndexPath); ok {
+
+	// index.md represents the directory's own page, not a child of it.
+	// To find its parent we need to go up one more level.
+	if filepath.Base(filePath) == "index.md" {
+		dir = filepath.Dir(dir)
+	}
+
+	// File sits directly in the local root — parent is the root page.
+	if dir == localRoot || dir == "." || !strings.HasPrefix(dir, localRoot) {
+		return cfg.RootPageID
+	}
+
+	// Check if this directory already has a page (index.md entry).
+	indexPath := dir + "/index.md"
+	if entry, ok := idx.ByPath(indexPath); ok {
 		return entry.PageID
 	}
-	// If we're in the local root, there's no parent in the index.
-	return ""
+
+	// Recurse: ensure the grandparent exists before creating this directory's page.
+	grandparentID := ensureParentPages(client, idx, cfg, indexPath, root, out)
+
+	// Create the intermediate Confluence page for this directory.
+	dirName := filepath.Base(dir)
+	title := lexer.ReverseSlugify(dirName + ".md")
+
+	page, err := client.CreatePage(cfg.SpaceKey, grandparentID, title, "")
+	if err != nil {
+		fmt.Fprintf(out, "[confluencer] WARNING: create intermediate page for %s: %v\n", dir, err)
+		return grandparentID
+	}
+
+	// Write an empty local index.md so subsequent files in this directory find the parent.
+	writeLocalFile(root, indexPath, "")
+
+	// Add to index.
+	idx.Add(index.Entry{
+		PageID:       page.PageID,
+		Title:        title,
+		LocalPath:    indexPath,
+		ParentPageID: grandparentID,
+	})
+
+	fmt.Fprintf(out, "[confluencer] create (intermediate): %s (page %s)\n", indexPath, page.PageID)
+	return page.PageID
 }
 
 // drainPending retries entries from .confluencer-pending.

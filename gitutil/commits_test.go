@@ -134,6 +134,56 @@ func TestListCommits_Empty(t *testing.T) {
 	}
 }
 
+func TestHeadSHA(t *testing.T) {
+	dir := initTestRepo(t)
+	want := headSHA(t, dir)
+
+	got, err := HeadSHA(dir)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+	if got != want {
+		t.Errorf("HeadSHA = %s, want %s", got, want)
+	}
+}
+
+func TestLastSyncCommit(t *testing.T) {
+	dir := initTestRepo(t)
+
+	// No sync commits yet.
+	sha, err := LastSyncCommit(dir)
+	if err != nil {
+		t.Fatalf("LastSyncCommit: %v", err)
+	}
+	if sha != "" {
+		t.Errorf("expected empty, got %s", sha)
+	}
+
+	// Add a sync commit.
+	writeFile(t, dir, "docs/page.md", "# Page\n")
+	syncSHA := commitAll(t, dir, "chore(sync): confluence")
+
+	sha, err = LastSyncCommit(dir)
+	if err != nil {
+		t.Fatalf("LastSyncCommit: %v", err)
+	}
+	if sha != syncSHA {
+		t.Errorf("got %s, want %s", sha, syncSHA)
+	}
+
+	// Add a non-sync commit after — sync commit should still be found.
+	writeFile(t, dir, "docs/page.md", "# Page v2\n")
+	commitAll(t, dir, "manual edit")
+
+	sha, err = LastSyncCommit(dir)
+	if err != nil {
+		t.Fatalf("LastSyncCommit: %v", err)
+	}
+	if sha != syncSHA {
+		t.Errorf("got %s, want %s", sha, syncSHA)
+	}
+}
+
 func TestCommitMessage(t *testing.T) {
 	dir := initTestRepo(t)
 	writeFile(t, dir, "docs/a.md", "a\n")

@@ -44,10 +44,21 @@ func runPull(cmd *cobra.Command, args []string) error {
 	}
 	lock, err := acquireLock(lockPath)
 	if err != nil {
-		// Lock held by another process — exit silently.
-		return nil
+		if stdinIsTerminal() {
+			// Direct invocation — stale lock is likely from a crashed run.
+			removeStaleLock(lockPath)
+			lock, err = acquireLock(lockPath)
+			if err != nil {
+				return fmt.Errorf("acquire pull lock: %w", err)
+			}
+		} else {
+			// Hook invocation — another hook is already running pull.
+			return nil
+		}
 	}
 	defer releaseLock(lock, lockPath)
+
+	fmt.Fprintf(out, "[confluencer] fetching page tree from Confluence...\n")
 
 	// Load config.
 	cfg, err := cfgpkg.LoadConfig(filepath.Join(root, configFile))
@@ -116,7 +127,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Compute the typed change set.
+	// Compute the typed change set (structural changes only).
 	changes := tree.Diff(tree.DiffInput{
 		Tree:    ct,
 		Paths:   pm,
@@ -124,12 +135,78 @@ func runPull(cmd *cobra.Command, args []string) error {
 		Missing: missingPages,
 	})
 
+	// Detect content changes via Confluence version comparison.
+	// Pages with structural changes are already handled; for the rest,
+	// a version mismatch means Confluence content may have changed.
+	structuralIDs := make(map[string]bool, len(changes))
+	for _, c := range changes {
+		structuralIDs[c.PageID] = true
+	}
+
+	pageRes := newPullPageResolver(ct, pm)
+
+	ct.Walk(func(node *tree.CfNode) {
+		if structuralIDs[node.PageID] {
+			return
+		}
+		entry, ok := idx.ByPageID(node.PageID)
+		if !ok {
+			return
+		}
+		if entry.Version == node.Version {
+			return
+		}
+
+		// Version mismatch — fetch body and compare against local file.
+		page, err := client.GetPage(node.PageID)
+		if err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s for content check: %v\n", node.PageID, err)
+			return
+		}
+
+		attRes := &stubAttachmentResolver{
+			localPath: entry.LocalPath, attachmentsDir: cfg.AttachmentsDir, localRoot: cfg.LocalRoot,
+		}
+		md, err := lexer.CfToMd(page.Body, lexer.CfToMdOpts{
+			Pages: pageRes, Attachments: attRes,
+		})
+		if err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: convert page %s: %v\n", node.PageID, err)
+			return
+		}
+
+		absPath := filepath.Join(root, filepath.FromSlash(entry.LocalPath))
+		localContent, err := os.ReadFile(absPath)
+		if err != nil {
+			return
+		}
+
+		if string(localContent) == md {
+			// Content matches despite version bump (e.g. metadata-only change).
+			// Update version in index to avoid re-checking next time.
+			idx.UpdateVersion(node.PageID, page.Version)
+			return
+		}
+
+		changes = append(changes, tree.Change{
+			Type:    tree.ContentChanged,
+			PageID:  node.PageID,
+			Title:   node.Title,
+			OldPath: entry.LocalPath,
+			NewPath: entry.LocalPath,
+		})
+	})
+
 	if len(changes) == 0 {
+		// Save index even when no content changes — version updates may have occurred.
+		if err := idx.Save(filepath.Join(root, indexFile)); err != nil {
+			return fmt.Errorf("save index: %w", err)
+		}
+		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
 		return nil
 	}
 
-	// Build resolvers for lexer conversion.
-	pageRes := newPullPageResolver(ct, pm)
+	fmt.Fprintf(out, "[confluencer] found %d change(s) to apply\n", len(changes))
 	var staged []string
 
 	// Process deletions first.
@@ -206,11 +283,17 @@ func runPull(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(out, "[confluencer] ERROR: write %s: %v\n", c.NewPath, err)
 				continue
 			}
+			node := ct.Page(c.PageID)
+			ver := 0
+			if node != nil {
+				ver = page.Version
+			}
 			idx.Add(index.Entry{
 				PageID:       c.PageID,
 				Title:        c.Title,
 				LocalPath:    c.NewPath,
 				ParentPageID: c.NewParentPageID,
+				Version:      ver,
 			})
 			staged = append(staged, c.NewPath)
 			fmt.Fprintf(out, "[confluencer] create: %s\n", c.NewPath)
@@ -270,8 +353,14 @@ func runPull(cmd *cobra.Command, args []string) error {
 			if c.Title != "" {
 				idx.UpdateTitle(c.PageID, c.Title)
 			}
+			idx.UpdateVersion(c.PageID, page.Version)
 		}
 	}
+
+	// Update versions in the index for all unchanged pages in the tree.
+	ct.Walk(func(node *tree.CfNode) {
+		idx.UpdateVersion(node.PageID, node.Version)
+	})
 
 	// Warn about orphaned and unknown pages.
 	for _, c := range changes {
@@ -301,6 +390,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	fmt.Fprintf(out, "[confluencer] done — %d change(s) synced from Confluence\n", len(changes))
 	return nil
 }
 
@@ -362,6 +452,11 @@ func acquireLock(path string) (*os.File, error) {
 // releaseLock closes and removes the lock file.
 func releaseLock(f *os.File, path string) {
 	f.Close()
+	os.Remove(path)
+}
+
+// removeStaleLock removes a lock file left behind by a crashed process.
+func removeStaleLock(path string) {
 	os.Remove(path)
 }
 
