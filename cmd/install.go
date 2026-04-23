@@ -10,7 +10,7 @@ import (
 )
 
 // hookNames lists the Git hooks that confluencer manages.
-var hookNames = []string{"pre-push", "post-merge", "post-rewrite"}
+var hookNames = []string{"pre-push", "post-merge", "post-rewrite", "post-checkout"}
 
 var installCmd = &cobra.Command{
 	Use:   "install",

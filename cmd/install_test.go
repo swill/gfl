@@ -36,7 +36,7 @@ func TestRunInstall(t *testing.T) {
 	// Create hook shims.
 	hooksDir := filepath.Join(dir, ".confluencer", "hooks")
 	os.MkdirAll(hooksDir, 0o755)
-	for _, name := range []string{"pre-push", "post-merge", "post-rewrite"} {
+	for _, name := range hookNames {
 		content := "#!/bin/sh\necho " + name + "\n"
 		os.WriteFile(filepath.Join(hooksDir, name), []byte(content), 0o644)
 	}
@@ -54,7 +54,7 @@ func TestRunInstall(t *testing.T) {
 	}
 
 	// Verify hooks were installed.
-	for _, name := range []string{"pre-push", "post-merge", "post-rewrite"} {
+	for _, name := range hookNames {
 		hookPath := filepath.Join(dir, ".git", "hooks", name)
 		info, err := os.Stat(hookPath)
 		if err != nil {

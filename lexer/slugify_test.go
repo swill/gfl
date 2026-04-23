@@ -20,7 +20,7 @@ func TestSlugify_Basic(t *testing.T) {
 		{"punctuation stripped", "What's new?!", "whats-new"},
 		{"slash and parens", "Notes (draft) / v2", "notes-draft-v2"},
 		{"colon and semicolon", "Scope: goals; non-goals", "scope-goals-non-goals"},
-		{"underscores preserved", "snake_case_name", "snake_case_name"},
+		{"underscores become hyphens", "snake_case_name", "snake-case-name"},
 		{"existing hyphens preserved", "already-hyphenated", "already-hyphenated"},
 		{"collapse consecutive hyphens from input", "a---b", "a-b"},
 		{"strip leading and trailing hyphens", "---hello---", "hello"},
@@ -88,7 +88,7 @@ func TestReverseSlugify(t *testing.T) {
 		{"suffix too short — not stripped", "foo-12345.md", "Foo 12345"},
 		{"suffix too long — not stripped", "foo-1234567.md", "Foo 1234567"},
 		{"suffix non-digit — not stripped", "foo-12a456.md", "Foo 12a456"},
-		{"underscores kept as-is", "snake_case.md", "Snake_case"},
+		{"underscores become spaces", "snake_case.md", "Snake Case"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -301,7 +301,7 @@ func TestSlugify_NeverProducesInvalidFilenameChars(t *testing.T) {
 	for _, in := range inputs {
 		got := Slugify(in, "1")
 		for i, r := range got {
-			ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+			ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
 			if !ok {
 				t.Errorf("invalid char %q at position %d in slug %q (input %q)", r, i, got, in)
 			}

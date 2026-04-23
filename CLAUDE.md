@@ -85,6 +85,7 @@ The lexer package owns both the conversion functions and `slugify` because slugi
       pre-push                    # tracked — shell shim, created by confluencer init
       post-merge                  # tracked — shell shim, created by confluencer init
       post-rewrite                # tracked — shell shim, created by confluencer init
+      post-checkout               # tracked — shell shim, created by confluencer init
 
   docs/                           # local root (configured in .confluencer.json)
     index.md                      # content of the Confluence root anchor page
@@ -275,9 +276,10 @@ Page titles are converted to filenames and directory names using the following d
 
 1. Convert to lowercase.
 2. Replace all whitespace sequences with a single hyphen.
-3. Remove all characters that are not alphanumeric, hyphens, or underscores.
-4. Collapse consecutive hyphens to a single hyphen.
-5. Strip leading and trailing hyphens.
+3. Replace all underscores with hyphens (so titles containing underscores produce hyphen-separated slugs, keeping the filename convention uniform).
+4. Remove all characters that are not alphanumeric or hyphens.
+5. Collapse consecutive hyphens to a single hyphen.
+6. Strip leading and trailing hyphens.
 
 If the result is empty (e.g. a page titled entirely in non-Latin characters that all get stripped), fall back to `page-<confluence_page_id>` as the slug. This is exceedingly rare in practice.
 
@@ -297,7 +299,7 @@ Used only when a file is renamed in Git and the new title must be written to Con
 
 1. Strip the `.md` extension.
 2. Strip any trailing `-<6-digit-collision-suffix>` if present.
-3. Replace all hyphens with spaces.
+3. Replace all hyphens and underscores with spaces.
 4. Apply title case (capitalise the first letter of each word).
 
 This is a best-effort conversion. The title is only written to Confluence when necessary — see Title Stability Rule below.
@@ -331,10 +333,10 @@ Both lexers emit and consume Markdown in a single canonical form. The normalisat
 10. **Inline code**: Single backticks. For code containing backticks, use the minimum doubled-backtick delimiter as per CommonMark.
 11. **Links**: Inline `[text](url)` form only. Reference-style links are not emitted; on input they are resolved to inline form before normalisation.
 12. **Images**: Inline `![alt](path)` form only. Alt text is required for attachment images — it defaults to the leaf filename (without extension) if Confluence provides no alt.
-13. **Tables**: GFM pipe tables. Header separator uses `---` per column (no alignment colons unless present in source). Cells are not padded to column width.
+13. **Tables**: GFM pipe tables. Header separator uses `---` per column. Alignment colons are preserved when present in source (e.g. `:---:` for centre, `---:` for right, `:---` for left); `cf_to_md` extracts alignment from Confluence `style="text-align: ..."` attributes. Cells are not padded to column width.
 14. **Blockquotes**: `>` followed by one space, then content. Nested blockquotes are `> >`.
 15. **Thematic break**: `---` on its own line.
-16. **Line length**: Unlimited. No hard wrap is performed. Paragraphs are single logical lines.
+16. **Line breaks**: Both hard breaks (`\\\n`) and soft breaks (bare newlines within a paragraph) are preserved as backslash-newline (`\\\n`). Confluence content relies on line breaks for layout, so collapsing soft breaks to spaces would destroy the author's intent. No hard wrap is performed; line length is unlimited.
 
 Normalisation is implemented in `lexer/normalise.go` as a function `Normalise(md string) string`. Both lexer outputs pass through this function before being returned. Round-trip tests assert byte equality after normalisation on both sides.
 
@@ -450,7 +452,9 @@ No confirmation prompt is issued: the developer's explicit `git rm` (push) or th
 
 ## Concurrent Writer / Version Conflict Resolution
 
-When two developers push overlapping changes, the second `PUT /rest/api/content/{id}` fails with 409 because Confluence requires strict version monotonicity. `confluencer push` handles this via three-way merge, using Git history (not a cached snapshot in the index) to locate the baseline.
+When Confluence content changes between syncs (whether from another developer, a direct Confluence edit, or a concurrent push), `confluencer push` detects and resolves the divergence via three-way merge, using Git history (not a cached snapshot in the index) to locate the baseline.
+
+**Proactive detection:** Before writing, `confluencer push` compares the fetched Confluence page version against the version stored in the index (`entry.version`). If they differ, a three-way merge is performed before the PUT — this catches Confluence-side edits without waiting for a 409. **Reactive fallback:** If a PUT returns 409 (e.g. a concurrent push landed between the fetch and the write), the same merge algorithm runs as a retry.
 
 ### Baseline lookup
 
@@ -461,7 +465,7 @@ For page with local path `P`, the baseline is the content of `P` at the most rec
 
 `gitutil/baseline.go` resolves this via `git log --follow --grep='^chore(sync): confluence' -- P`, taking the first hit, then `git show <commit>:P` to read the bytes. If no such commit exists (the file was created by the developer and has never been synced), baseline is the empty string.
 
-### Merge algorithm on 409
+### Merge algorithm (proactive version mismatch or 409)
 
 1. Fetch the current Confluence page content and version via `GET /content/{id}?expand=body.storage,version`.
 2. Convert fetched storage XML to Markdown via `cf_to_md` → `theirs`.
@@ -478,17 +482,17 @@ For page with local path `P`, the baseline is the content of `P` at the most rec
    - Queue to `.confluencer-pending` so it can be retried after the developer resolves.
    - Continue processing other pages.
 
-This algorithm applies uniformly to any PUT that returns 409 — whether from a concurrent push, a live Confluence edit, or a retry from `.confluencer-pending`.
+This algorithm runs both proactively (version mismatch detected before PUT) and reactively (409 response from PUT). It applies uniformly regardless of the cause — concurrent push, live Confluence edit, or retry from `.confluencer-pending`.
 
 ---
 
 ## Git Hook Behaviour
 
-To cover the full developer workflow (including `git pull --rebase` and fast-forward merges), pull-direction sync is installed on both `post-merge` and `post-rewrite`. Push-direction sync is on `pre-push`.
+To cover the full developer workflow (including `git pull --rebase`, fast-forward merges, and branch switches), pull-direction sync is installed on `post-merge`, `post-rewrite`, and `post-checkout`. Push-direction sync is on `pre-push`, which also runs a pull before pushing to ensure Confluence edits are captured even when no upstream Git changes triggered a hook.
 
-### `pre-push` hook → `confluencer push`
+### `pre-push` hook → `confluencer pull` + `confluencer push`
 
-Fires before Git transmits commits to the remote. Also works when invoked directly as `confluencer push` (without a Git push in progress).
+Fires before Git transmits commits to the remote. The hook shim runs `confluencer pull` first, then `confluencer push`, ensuring Confluence-side edits are fetched and merged before local changes are written to Confluence. Also works when invoked directly as `confluencer push` (without a Git push in progress); in direct mode, the pull is run inline before push processing begins.
 
 **Commit range detection:**
 
@@ -508,7 +512,7 @@ Fires before Git transmits commits to the remote. Also works when invoked direct
    - **Deleted** (`D`): look up page ID in index, `DELETE /rest/api/content/{id}`, remove index entry. Already-deleted pages (404) are treated as success.
    - **Renamed** (`R`): apply the Title Stability Rule to decide whether a title change is needed. Fetch current page for version number. Convert local content via `md_to_cf`. `PUT` with new title, body, and parent ID (derived from directory structure). Update index entry with new path, title, and parent.
    - **Added** (`A`): if the file is already tracked in the index (e.g. created by `confluencer init`), treat as a content update. Otherwise, convert local content via `md_to_cf`, derive parent page ID from the directory's `index.md` entry (falling back to root page), `POST /rest/api/content` to create the page, and record new page ID in the index.
-   - **Modified** (`M`): convert local content via `md_to_cf`. Fetch current page for version number. `PUT /rest/api/content/{id}` with version + 1. On 409, enter the three-way merge algorithm (see Concurrent Writer / Version Conflict Resolution).
+   - **Modified** (`M`): fetch current page for version number. Compare the fetched version against the version stored in the index (`entry.version`). If they differ, Confluence was edited since the last sync — run the three-way merge algorithm proactively (see Concurrent Writer / Version Conflict Resolution) before writing. Convert local content (or merged content) via `md_to_cf`. `PUT /rest/api/content/{id}` with fetched version + 1. On 409, enter the three-way merge algorithm as a fallback.
 7. On unrecoverable failure per item, append to `.confluencer-pending`, warn on stderr, continue.
 8. Save the updated index.
 9. Exit 0 in all cases except catastrophic errors (e.g. cannot read config file). The Git push proceeds.
@@ -523,9 +527,13 @@ Fires after any merge completes (including fast-forward). Responsible for pullin
 
 Fires after `git rebase` and `git commit --amend`. Runs the same pull logic so that developers who rebase-based workflows don't miss Confluence sync.
 
+### `post-checkout` hook → `confluencer pull`
+
+Fires after `git checkout` and `git switch`. The hook shim only runs on branch checkouts (flag `$3 = 1`), not file checkouts, to avoid unnecessary API calls when restoring individual files. This covers `git pull` fast-forward scenarios where `post-merge` does not fire, and branch switches where the developer may want fresh Confluence content.
+
 ### Shared pull sequence
 
-Invoked by both `post-merge` and `post-rewrite` (and `confluencer pull` directly):
+Invoked by `post-merge`, `post-rewrite`, `post-checkout` (and `confluencer pull` directly):
 
 1. Acquire a short-lived file lock (`.confluencer/.pull.lock`) to prevent concurrent post-merge + post-rewrite double-fires. If lock is held, exit 0 silently — the holder will do the work. When invoked directly (not from a hook), a stale lock from a crashed run is removed and retried.
 2. Fetch the full Confluence page tree rooted at `confluence_root_page_id` via the REST API (structure only — bodies are not fetched at this stage).
@@ -547,7 +555,9 @@ Invoked by both `post-merge` and `post-rewrite` (and `confluencer pull` directly
 
 **`post-merge` specifics**: the sync commit is appended after the merge commit. This is a minor behavioural change from the previous `pre-merge-commit` design — sync no longer folds into the merge commit itself. This is acceptable because (a) it buys coverage of fast-forward merges and rebases, (b) it makes the sync commit atomically attributable in log history, and (c) the merge commit itself remains clean.
 
-**`post-rewrite` specifics**: after a rebase, the rewrite may have clobbered prior sync commits' messages if the developer squashed or reworded them. The sync commit emitted by the post-rewrite pull re-establishes the marker on the new tip. Potential double-sync across post-merge + post-rewrite is prevented by the file lock.
+**`post-rewrite` specifics**: after a rebase, the rewrite may have clobbered prior sync commits' messages if the developer squashed or reworded them. The sync commit emitted by the post-rewrite pull re-establishes the marker on the new tip. Potential double-sync across post-merge + post-rewrite + post-checkout is prevented by the file lock.
+
+**`post-checkout` specifics**: only fires on branch checkouts (`$3 = 1`), not file restores. This covers `git pull` fast-forward scenarios where the working tree moves forward without triggering `post-merge`, and branch switches where Confluence may have been edited since the branch was last active.
 
 ---
 
@@ -576,7 +586,7 @@ confluencer init --page-id <root-page-id> [--local-root <path>]
 7. Write `.confluencer.json` including the cached space key.
 8. Write `.confluencer-index.json`.
 9. Append to `.gitignore` if entries for `.env` and `.confluencer-pending` are not already present.
-10. Create `.confluencer/hooks/` with hook shims for `pre-push`, `post-merge`, and `post-rewrite`.
+10. Create `.confluencer/hooks/` with hook shims for `pre-push`, `post-merge`, `post-rewrite`, and `post-checkout`.
 11. Install hooks into `.git/hooks/` (same operation as `confluencer install`).
 12. Print a summary.
 13. Do not make any Git commits. Leave staging to the developer.
@@ -614,7 +624,7 @@ The lexers are **pure**: no network, filesystem, or index access. Attachment han
 | `<ac:link><ri:page .../>` | `[Page Title](<relative-path>)` via `PageResolver` (path form, not slug form) |
 | `<ac:image><ri:attachment ac:filename="x.png"/></ac:image>` | `![x](<relative-path>/_attachments/<page-path>/x.png)` |
 | `<ac:image><ri:url ri:value="url"/></ac:image>` | `![](url)` |
-| `<table>` | GFM pipe table |
+| `<table>` | GFM pipe table (column alignment extracted from `style="text-align: ..."` on `<th>`/`<td>` elements → `:---:`, `---:`, `:---` separators) |
 | `<ac:structured-macro ac:name="note\|warning\|tip\|info">` | `> **Note/Warning/Tip/Info:** body text` (blockquote form) |
 | `<ac:structured-macro ac:name="toc">` | Omitted entirely |
 | `<hr/>` | `---` |
@@ -648,11 +658,14 @@ The lexers are **pure**: no network, filesystem, or index access. Attachment han
 | Image (`_attachments/...` path) | `<ac:image><ri:attachment ri:filename="..."/></ac:image>` |
 | Image (remote URL) | `<ac:image><ri:url ri:value="url"/></ac:image>` |
 | Blockquote | `<blockquote>` |
-| Table | `<table><tbody>` with `<tr><th>` / `<tr><td>` |
+| Table | `<table><tbody>` with `<tr><th>` / `<tr><td>` (alignment colons → `style="text-align: ..."` on cells) |
+| Hard break (`\\\n`) / Soft break (bare newline) | `<br/>` (both treated as significant line breaks) |
 | Thematic break | `<hr/>` |
 | Confluence-native fence block | Verbatim splice of the fenced storage XML |
 | Inline fence token | Verbatim splice inline |
 | Raw HTML block not inside a fence | Wrapped in `<p>` and escaped as plain text (do **not** emit `<ac:structured-macro ac:name="html">` — many Confluence Cloud instances disable it) |
+
+CommonMark backslash escapes (e.g. `\*`, `\_`, `\\`) are resolved to their literal characters before XML encoding. This prevents escape accumulation on round trips — goldmark's AST preserves the backslash in the raw segment, and without stripping it, each round trip would add another layer of escaping.
 
 **Output:** Well-formed Confluence storage XML string, suitable for `body.storage.value`.
 
@@ -838,6 +851,7 @@ Created automatically by `confluencer init`. The shims invoke `confluencer` from
 ```sh
 #!/bin/sh
 set -e
+confluencer pull
 confluencer push
 ```
 
@@ -855,9 +869,18 @@ set -e
 confluencer pull
 ```
 
+**`post-checkout`:**
+```sh
+#!/bin/sh
+# Only run on branch checkouts (flag=1), not file checkouts.
+if [ "$3" = "1" ]; then
+  confluencer pull
+fi
+```
+
 ### `confluencer install`
 
-Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-merge`, and `.confluencer/hooks/post-rewrite` into `.git/hooks/` and marks them executable. Idempotent — safe to run multiple times. Used by developers who clone an existing confluencer-managed repository and need to activate the hooks locally.
+Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-merge`, `.confluencer/hooks/post-rewrite`, and `.confluencer/hooks/post-checkout` into `.git/hooks/` and marks them executable. Idempotent — safe to run multiple times. Used by developers who clone an existing confluencer-managed repository and need to activate the hooks locally.
 
 ---
 
@@ -869,7 +892,7 @@ Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-me
 | `confluencer install` | Copy hook shims from `.confluencer/hooks/` into `.git/hooks/`. Used after cloning an existing confluencer-managed repo. |
 | `confluencer push` | Invoked by pre-push hook. Write changed, added, renamed, and deleted Markdown to Confluence. Update index. Drain `.confluencer-pending` first. |
 | `confluencer push --retry` | Drain `.confluencer-pending` outside of a Git push. |
-| `confluencer pull` | Invoked by post-merge and post-rewrite. Fetch Confluence tree, apply typed change set, commit as `chore(sync): confluence`. |
+| `confluencer pull` | Invoked by post-merge, post-rewrite, and post-checkout hooks (and by pre-push before pushing). Fetch Confluence tree, apply typed change set, commit as `chore(sync): confluence`. |
 | `confluencer status` | Report pending writes, orphaned pages, and pending deletions. |
 | `confluencer version` | Print version, commit, and build date. |
 

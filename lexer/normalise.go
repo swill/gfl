@@ -318,10 +318,12 @@ func renderTableRow(cells []string, cols int) string {
 	return "| " + strings.Join(out, " | ") + " |"
 }
 
-// renderInline renders all inline children of a node as a single line. Soft
-// line breaks become single spaces (rule 16: paragraphs are single logical
-// lines). Hard line breaks become "\\\n" — the backslash form preserves the
-// break without violating rule 3 (no trailing whitespace).
+// renderInline renders all inline children of a node. Hard line breaks and
+// soft line breaks both emit "\\\n" — the backslash form preserves line
+// breaks without trailing whitespace. This is intentionally more conservative
+// than CommonMark (which treats soft breaks as spaces) because Confluence
+// content relies on line breaks for layout, and collapsing them destroys
+// the author's intent.
 func (r *mdRenderer) renderInline(n ast.Node) string {
 	var sb strings.Builder
 	r.writeInline(&sb, n)
@@ -334,11 +336,8 @@ func (r *mdRenderer) writeInline(sb *strings.Builder, parent ast.Node) {
 		case *ast.Text:
 			seg := node.Segment
 			sb.Write(seg.Value(r.source))
-			if node.HardLineBreak() {
-				// Bypass rule-3 trailing-whitespace form; use backslash form.
+			if node.HardLineBreak() || node.SoftLineBreak() {
 				sb.WriteString("\\\n")
-			} else if node.SoftLineBreak() {
-				sb.WriteByte(' ')
 			}
 		case *ast.String:
 			sb.Write(node.Value)

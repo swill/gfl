@@ -73,6 +73,21 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Pull from Confluence before pushing to avoid stale overwrites.
+	// In hook mode the pre-push shim already runs `confluencer pull` first,
+	// so only do this for direct invocations.
+	if stdinIsTerminal() {
+		fmt.Fprintf(out, "[confluencer] pulling from Confluence before push...\n")
+		if err := runPull(cmd, nil); err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: pre-push pull failed: %v\n", err)
+		}
+		// Reload index — pull may have updated it.
+		idx, err = index.Load(filepath.Join(root, indexFile))
+		if err != nil {
+			return fmt.Errorf("reload index after pull: %w", err)
+		}
+	}
+
 	// Determine commit ranges to scan for .md changes.
 	type commitRange struct{ base, head string }
 	var ranges []commitRange
@@ -109,6 +124,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	totalProcessed := 0
+	var staged []string
 	for _, r := range ranges {
 		diffs, err := gitutil.DiffRange(root, r.base, r.head)
 		if err != nil {
@@ -141,17 +157,17 @@ func runPush(cmd *cobra.Command, args []string) error {
 				pushDelete(client, idx, d, pendingPath, root, out)
 
 			case gitutil.ActionRenamed:
-				pushRename(client, idx, cfg, d, pendingPath, root, out)
+				pushRename(client, idx, cfg, d, pendingPath, root, &staged, out)
 
 			case gitutil.ActionAdded:
 				if _, ok := idx.ByPath(d.Path); ok {
-					pushUpdate(client, idx, cfg, d, pendingPath, root, out)
+					pushUpdate(client, idx, cfg, d, pendingPath, root, &staged, out)
 				} else {
-					pushCreate(client, idx, cfg, d, pendingPath, root, out)
+					pushCreate(client, idx, cfg, d, pendingPath, root, &staged, out)
 				}
 
 			case gitutil.ActionModified:
-				pushUpdate(client, idx, cfg, d, pendingPath, root, out)
+				pushUpdate(client, idx, cfg, d, pendingPath, root, &staged, out)
 			}
 			totalProcessed++
 		}
@@ -160,6 +176,18 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Save updated index.
 	if err := idx.Save(filepath.Join(root, indexFile)); err != nil {
 		return fmt.Errorf("save index: %w", err)
+	}
+
+	// Commit the updated index and any files created during push.
+	if totalProcessed > 0 {
+		toStage := append(staged, indexFile)
+		if err := gitutil.Add(root, toStage...); err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: stage sync files: %v\n", err)
+		} else if err := gitutil.Commit(root, gitutil.SyncPrefix); err != nil {
+			if !strings.Contains(err.Error(), "nothing to commit") {
+				fmt.Fprintf(out, "[confluencer] WARNING: commit sync: %v\n", err)
+			}
+		}
 	}
 
 	if totalProcessed == 0 {
@@ -252,13 +280,13 @@ func pushDelete(client *api.Client, idx *index.Index, d gitutil.FileDiff, pendin
 }
 
 // pushRename handles a renamed .md file.
-func pushRename(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, out io.Writer) {
+func pushRename(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, staged *[]string, out io.Writer) {
 	entry, ok := idx.ByPath(d.OldPath)
 	if !ok {
 		// Not tracked under old path — treat as a create.
 		pushCreate(client, idx, cfg, gitutil.FileDiff{
 			Action: gitutil.ActionAdded, Path: d.Path,
-		}, pendingPath, root, out)
+		}, pendingPath, root, staged, out)
 		return
 	}
 
@@ -284,7 +312,7 @@ func pushRename(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 	}
 
 	// Determine new parent from directory structure.
-	newParentID := ensureParentPages(client, idx, cfg, d.Path, root, out)
+	newParentID := ensureParentPages(client, idx, cfg, d.Path, root, staged, out)
 
 	// Read local content for the renamed file.
 	content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(d.Path)))
@@ -321,7 +349,7 @@ func pushRename(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 }
 
 // pushCreate handles a newly added .md file.
-func pushCreate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, out io.Writer) {
+func pushCreate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, staged *[]string, out io.Writer) {
 	// Read local content.
 	content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(d.Path)))
 	if err != nil {
@@ -336,7 +364,7 @@ func pushCreate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 	}
 
 	title := lexer.ReverseSlugify(filepath.Base(d.Path))
-	parentID := ensureParentPages(client, idx, cfg, d.Path, root, out)
+	parentID := ensureParentPages(client, idx, cfg, d.Path, root, staged, out)
 
 	page, err := client.CreatePage(cfg.SpaceKey, parentID, title, storageXML)
 	if err != nil {
@@ -359,11 +387,11 @@ func pushCreate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 }
 
 // pushUpdate handles a modified .md file.
-func pushUpdate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, out io.Writer) {
+func pushUpdate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitutil.FileDiff, pendingPath, root string, staged *[]string, out io.Writer) {
 	entry, ok := idx.ByPath(d.Path)
 	if !ok {
 		// Not tracked — treat as create.
-		pushCreate(client, idx, cfg, d, pendingPath, root, out)
+		pushCreate(client, idx, cfg, d, pendingPath, root, staged, out)
 		return
 	}
 
@@ -373,14 +401,9 @@ func pushUpdate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 		fmt.Fprintf(out, "[confluencer] WARNING: read %s: %v\n", d.Path, err)
 		return
 	}
+	oursMd := string(content)
 
-	storageXML, err := lexer.MdToCf(string(content), lexer.MdToCfOpts{})
-	if err != nil {
-		fmt.Fprintf(out, "[confluencer] WARNING: convert %s: %v\n", d.Path, err)
-		return
-	}
-
-	// Fetch current page for version.
+	// Fetch current page from Confluence.
 	page, err := client.GetPage(entry.PageID)
 	if err != nil {
 		fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s: %v — queued\n", entry.PageID, err)
@@ -391,10 +414,44 @@ func pushUpdate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 		return
 	}
 
+	// Detect Confluence-side edits since last sync by comparing versions.
+	if entry.Version != 0 && page.Version != entry.Version {
+		theirsMd, cfErr := lexer.CfToMd(page.Body, lexer.CfToMdOpts{})
+		if cfErr != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: convert Confluence content for %s: %v\n", d.Path, cfErr)
+		} else {
+			baseMd, _ := gitutil.Baseline(root, d.Path)
+			merged, conflict, mergeErr := gitutil.MergeFile(oursMd, baseMd, theirsMd)
+			if mergeErr != nil {
+				fmt.Fprintf(out, "[confluencer] WARNING: merge %s: %v\n", d.Path, mergeErr)
+			} else if conflict {
+				absPath := filepath.Join(root, filepath.FromSlash(d.Path))
+				os.WriteFile(absPath, []byte(merged), 0o644)
+				fmt.Fprintf(out, "[confluencer] CONFLICT: %s — local and Confluence both changed. Resolve, commit, and re-push.\n", d.Path)
+				queuePending(pendingPath, index.PendingEntry{
+					Type: index.PendingContent, PageID: entry.PageID, LocalPath: d.Path,
+					Attempt: 1, LastError: "conflict markers written", QueuedAt: time.Now().UTC(),
+				})
+				return
+			} else {
+				fmt.Fprintf(out, "[confluencer] merged: %s (Confluence was also edited)\n", d.Path)
+				oursMd = merged
+				writeLocalFile(root, d.Path, merged)
+				*staged = append(*staged, d.Path)
+			}
+		}
+	}
+
+	storageXML, err := lexer.MdToCf(oursMd, lexer.MdToCfOpts{})
+	if err != nil {
+		fmt.Fprintf(out, "[confluencer] WARNING: convert %s: %v\n", d.Path, err)
+		return
+	}
+
 	if err := client.UpdatePage(entry.PageID, page.Version+1, entry.Title, storageXML, ""); err != nil {
 		if api.IsConflict(err) {
-			// Three-way merge on 409.
-			merged, resolved := handleConflict(client, root, d.Path, storageXML, entry, out)
+			// Concurrent push happened between our GET and PUT — re-merge.
+			merged, resolved := handleConflict(client, root, d.Path, storageXML, entry, staged, out)
 			if !resolved {
 				queuePending(pendingPath, index.PendingEntry{
 					Type: index.PendingContent, PageID: entry.PageID, LocalPath: d.Path,
@@ -413,12 +470,13 @@ func pushUpdate(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, d gitu
 		}
 	}
 
+	idx.UpdateVersion(entry.PageID, page.Version+1)
 	fmt.Fprintf(out, "[confluencer] update: %s\n", d.Path)
 }
 
 // handleConflict performs a three-way merge on 409 conflict.
 // Returns the merged storage XML and whether resolution succeeded.
-func handleConflict(client *api.Client, root, path, oursXML string, entry index.Entry, out io.Writer) (string, bool) {
+func handleConflict(client *api.Client, root, path, oursXML string, entry index.Entry, staged *[]string, out io.Writer) (string, bool) {
 	// Re-fetch to get the latest version.
 	latest, err := client.GetPage(entry.PageID)
 	if err != nil {
@@ -473,6 +531,7 @@ func handleConflict(client *api.Client, root, path, oursXML string, entry index.
 		return "", false
 	}
 
+	*staged = append(*staged, path)
 	fmt.Fprintf(out, "[confluencer] merged: %s\n", path)
 	return mergedXML, true
 }
@@ -482,7 +541,7 @@ func handleConflict(client *api.Client, root, path, oursXML string, entry index.
 // directory that doesn't already have a corresponding page in the index.
 // Returns the page ID of the immediate parent, or cfg.RootPageID if the file
 // sits directly in the local root.
-func ensureParentPages(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, filePath, root string, out io.Writer) string {
+func ensureParentPages(client *api.Client, idx *index.Index, cfg *cfgpkg.Config, filePath, root string, staged *[]string, out io.Writer) string {
 	localRoot := strings.TrimSuffix(cfg.LocalRoot, "/")
 
 	dir := filepath.Dir(filePath)
@@ -505,7 +564,7 @@ func ensureParentPages(client *api.Client, idx *index.Index, cfg *cfgpkg.Config,
 	}
 
 	// Recurse: ensure the grandparent exists before creating this directory's page.
-	grandparentID := ensureParentPages(client, idx, cfg, indexPath, root, out)
+	grandparentID := ensureParentPages(client, idx, cfg, indexPath, root, staged, out)
 
 	// Create the intermediate Confluence page for this directory.
 	dirName := filepath.Base(dir)
@@ -519,6 +578,7 @@ func ensureParentPages(client *api.Client, idx *index.Index, cfg *cfgpkg.Config,
 
 	// Write an empty local index.md so subsequent files in this directory find the parent.
 	writeLocalFile(root, indexPath, "")
+	*staged = append(*staged, indexPath)
 
 	// Add to index.
 	idx.Add(index.Entry{

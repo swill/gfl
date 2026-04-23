@@ -45,7 +45,7 @@ func Slugify(title, pageID string) string {
 	}
 	s = b.String()
 
-	// Step 3: drop anything that isn't [a-z0-9_-].
+	// Step 3: drop anything that isn't [a-z0-9-]; convert underscores to hyphens.
 	b.Reset()
 	b.Grow(len(s))
 	for _, r := range s {
@@ -54,8 +54,10 @@ func Slugify(title, pageID string) string {
 			b.WriteRune(r)
 		case r >= '0' && r <= '9':
 			b.WriteRune(r)
-		case r == '-' || r == '_':
+		case r == '-':
 			b.WriteRune(r)
+		case r == '_':
+			b.WriteByte('-')
 		}
 	}
 	s = b.String()
@@ -84,7 +86,7 @@ func Slugify(title, pageID string) string {
 func ReverseSlugify(filename string) string {
 	s := strings.TrimSuffix(filename, ".md")
 	s = stripCollisionSuffix(s)
-	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.NewReplacer("-", " ", "_", " ").Replace(s)
 
 	var b strings.Builder
 	b.Grow(len(s))

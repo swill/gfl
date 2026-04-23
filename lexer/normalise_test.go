@@ -39,9 +39,9 @@ func TestNormalise_Empty(t *testing.T) {
 
 func TestNormalise_LineEndings(t *testing.T) {
 	runCases(t, []caseT{
-		{"crlf to lf", "hello\r\nworld\r\n", "hello world\n"},
-		{"cr to lf", "hello\rworld\r", "hello world\n"},
-		{"mixed", "a\r\nb\rc\n", "a b c\n"},
+		{"crlf to lf", "hello\r\nworld\r\n", "hello\\\nworld\n"},
+		{"cr to lf", "hello\rworld\r", "hello\\\nworld\n"},
+		{"mixed", "a\r\nb\rc\n", "a\\\nb\\\nc\n"},
 	})
 }
 
@@ -55,9 +55,9 @@ func TestNormalise_BOMStripped(t *testing.T) {
 
 func TestNormalise_TrailingWhitespace(t *testing.T) {
 	runCases(t, []caseT{
-		{"spaces at eol", "hello   \nworld   \n", "hello world\n"},
-		{"tabs at eol", "hello\t\t\nworld\t\n", "hello world\n"},
-		{"mixed", "hello \t \nworld\n", "hello world\n"},
+		{"spaces at eol", "hello   \nworld   \n", "hello\\\nworld\n"},
+		{"tabs at eol", "hello\t\t\nworld\t\n", "hello\\\nworld\n"},
+		{"mixed", "hello \t \nworld\n", "hello\\\nworld\n"},
 	})
 }
 
@@ -220,9 +220,9 @@ func TestNormalise_Blockquote(t *testing.T) {
 			"> hello\n",
 		},
 		{
-			"multiline blockquote becomes single logical line",
+			"multiline blockquote preserves line breaks",
 			"> line one\n> line two\n",
-			"> line one line two\n",
+			"> line one\\\n> line two\n",
 		},
 		{
 			"multi-block blockquote keeps blank-line separator",
@@ -297,11 +297,11 @@ func TestNormalise_HTMLBlockPreserved(t *testing.T) {
 	}
 }
 
-func TestNormalise_ParagraphIsSingleLogicalLine(t *testing.T) {
+func TestNormalise_ParagraphPreservesLineBreaks(t *testing.T) {
 	in := "First line.\nSecond line.\nThird line.\n"
-	want := "First line. Second line. Third line.\n"
+	want := "First line.\\\nSecond line.\\\nThird line.\n"
 	if got := Normalise(in); got != want {
-		t.Fatalf("paragraph join:\nwant: %q\ngot:  %q", want, got)
+		t.Fatalf("paragraph line breaks:\nwant: %q\ngot:  %q", want, got)
 	}
 }
 
@@ -351,7 +351,7 @@ func TestNormalise_MixedDocument(t *testing.T) {
 
 func TestNormaliseBytes(t *testing.T) {
 	got := NormaliseBytes([]byte("hello\r\nworld\r\n"))
-	if string(got) != "hello world\n" {
+	if string(got) != "hello\\\nworld\n" {
 		t.Fatalf("NormaliseBytes: got %q", string(got))
 	}
 }

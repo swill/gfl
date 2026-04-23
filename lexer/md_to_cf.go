@@ -338,16 +338,17 @@ func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
 	switch node := n.(type) {
 	case *ast.Text:
 		seg := node.Segment
-		w.sb.WriteString(xmlEscape(string(seg.Value(w.source))))
+		w.sb.WriteString(xmlEscape(stripBackslashEscapes(string(seg.Value(w.source)))))
 		switch {
 		case node.HardLineBreak():
 			// Confluence treats <br/> inside a paragraph as a hard break; this
 			// matches what Markdown intended with trailing "\\\n" / "  \n".
 			w.sb.WriteString("<br/>")
 		case node.SoftLineBreak():
-			// Soft breaks are whitespace in the source but still need to
-			// separate the adjacent tokens — emit a literal space.
-			w.sb.WriteByte(' ')
+			// Soft breaks are treated as significant line breaks (matching the
+			// normaliser's policy) because Confluence content relies on line
+			// breaks for layout.
+			w.sb.WriteString("<br/>")
 		}
 	case *ast.String:
 		w.sb.WriteString(xmlEscape(string(node.Value)))
@@ -532,6 +533,31 @@ func readLines(n ast.Node, source []byte) string {
 // "]]" is content (two ] characters), "]]>" closes the current CDATA,
 // "<![CDATA[" opens a fresh one, and ">" is content. The decoder reassembles
 // the original "]]>" by concatenating "]]" + ">" from adjacent sections.
+// stripBackslashEscapes resolves CommonMark backslash escapes in raw text
+// segments. Goldmark's Segment.Value returns the source bytes verbatim, so
+// `\*` appears as two bytes. In Confluence storage XML the backslash has no
+// special meaning, so we strip it here to prevent escape accumulation on
+// round trips.
+func stripBackslashEscapes(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			next := s[i+1]
+			if strings.ContainsRune("\\`*_{}[]()#+-.!|~>", rune(next)) {
+				sb.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}
+
 func wrapCDATA(s string) string {
 	if !strings.Contains(s, "]]>") {
 		return "<![CDATA[" + s + "]]>"

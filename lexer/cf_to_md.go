@@ -445,7 +445,7 @@ func (r *cfRenderer) renderTable(n *cfNode) string {
 		return ""
 	}
 
-	headerCells := r.renderTableRow(rows[0])
+	headerCells, headerAligns := r.renderTableRowWithAlign(rows[0])
 	cols := len(headerCells)
 	if cols == 0 {
 		return ""
@@ -456,7 +456,20 @@ func (r *cfRenderer) renderTable(n *cfNode) string {
 
 	seps := make([]string, cols)
 	for i := range seps {
-		seps[i] = "---"
+		align := ""
+		if i < len(headerAligns) {
+			align = headerAligns[i]
+		}
+		switch align {
+		case "center":
+			seps[i] = ":---:"
+		case "right":
+			seps[i] = "---:"
+		case "left":
+			seps[i] = ":---"
+		default:
+			seps[i] = "---"
+		}
 	}
 	lines = append(lines, "| "+strings.Join(seps, " | ")+" |")
 
@@ -475,16 +488,36 @@ func (r *cfRenderer) renderTable(n *cfNode) string {
 }
 
 func (r *cfRenderer) renderTableRow(tr *cfNode) []string {
-	var out []string
+	cells, _ := r.renderTableRowWithAlign(tr)
+	return cells
+}
+
+func (r *cfRenderer) renderTableRowWithAlign(tr *cfNode) (cells []string, aligns []string) {
 	for _, c := range tr.children {
 		if c.kind != cfElement {
 			continue
 		}
 		if c.name == "th" || c.name == "td" {
-			out = append(out, r.inline(c))
+			cells = append(cells, r.inline(c))
+			aligns = append(aligns, cellAlignment(c))
 		}
 	}
-	return out
+	return
+}
+
+// cellAlignment extracts text-align from a <th>/<td> style attribute.
+func cellAlignment(n *cfNode) string {
+	style := n.attr("style")
+	if style == "" {
+		return ""
+	}
+	for _, part := range strings.Split(style, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "text-align:") {
+			return strings.TrimSpace(strings.TrimPrefix(part, "text-align:"))
+		}
+	}
+	return ""
 }
 
 // --- Inline rendering -------------------------------------------------------
