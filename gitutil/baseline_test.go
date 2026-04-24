@@ -84,6 +84,37 @@ func TestShowFile(t *testing.T) {
 	}
 }
 
+func TestLastCommitTouching(t *testing.T) {
+	dir := initTestRepo(t)
+
+	writeFile(t, dir, ".confluencer-index.json", "{}\n")
+	indexCommit := commitAll(t, dir, "initialized confluencer")
+
+	// A later commit that does NOT touch the index must not shadow it.
+	writeFile(t, dir, "docs/page.md", "hello\n")
+	commitAll(t, dir, "add doc")
+
+	sha, err := LastCommitTouching(dir, ".confluencer-index.json")
+	if err != nil {
+		t.Fatalf("LastCommitTouching: %v", err)
+	}
+	if sha != indexCommit {
+		t.Errorf("got %s, want %s", sha, indexCommit)
+	}
+}
+
+func TestLastCommitTouching_None(t *testing.T) {
+	dir := initTestRepo(t)
+
+	sha, err := LastCommitTouching(dir, ".confluencer-index.json")
+	if err != nil {
+		t.Fatalf("LastCommitTouching: %v", err)
+	}
+	if sha != "" {
+		t.Errorf("expected empty, got %q", sha)
+	}
+}
+
 func TestBaseline(t *testing.T) {
 	dir := initTestRepo(t)
 

@@ -206,11 +206,17 @@ func writeHookShims(root string) error {
 		return err
 	}
 
+	guard := `
+if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+  exit 0
+fi
+export CONFLUENCER_HOOK_ACTIVE=1
+`
 	shims := map[string]string{
-		"pre-push":      "#!/bin/sh\nset -e\nconfluencer pull\nconfluencer push\n",
-		"post-merge":    "#!/bin/sh\nset -e\nconfluencer pull\n",
-		"post-rewrite":  "#!/bin/sh\nset -e\nconfluencer pull\n",
-		"post-checkout": "#!/bin/sh\n# Only run on branch checkouts (flag=1), not file checkouts.\nif [ \"$3\" = \"1\" ]; then\n  confluencer pull\nfi\n",
+		"pre-push":     "#!/bin/sh\nset -e\nconfluencer push\n",
+		"post-commit":  "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
+		"post-merge":   "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
+		"post-rewrite": "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
 	}
 
 	for name, content := range shims {

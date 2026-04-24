@@ -112,6 +112,19 @@ func LastSyncCommit(repoDir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// GitDir returns the absolute path to the .git directory for repoDir.
+// For a normal repository this is <repoDir>/.git; for worktrees and
+// submodules it resolves to the correct storage location.
+func GitDir(repoDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --absolute-git-dir: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // HeadSHA returns the SHA of the current HEAD commit.
 func HeadSHA(repoDir string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "HEAD")

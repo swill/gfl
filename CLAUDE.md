@@ -33,8 +33,8 @@ confluencer/
     root.go           # root cobra command
     helpers.go        # shared constants and helper functions (repoRoot, file paths)
     init.go           # populate a git repo from an existing Confluence tree
-    push.go           # push orchestration (pre-push hook)
-    pull.go           # pull orchestration (post-merge + post-rewrite hooks)
+    push.go           # push orchestration (pre-push hook, fire-and-forget to Confluence)
+    pull.go           # pull orchestration (post-commit + post-merge + post-rewrite hooks, branch-based rebase)
     install.go        # copies hook shims from .confluencer/hooks/ into .git/hooks/
     status.go         # reports pending Confluence writes and orphan warnings
   lexer/
@@ -83,9 +83,9 @@ The lexer package owns both the conversion functions and `slugify` because slugi
   .confluencer/
     hooks/
       pre-push                    # tracked — shell shim, created by confluencer init
+      post-commit                 # tracked — shell shim, created by confluencer init
       post-merge                  # tracked — shell shim, created by confluencer init
       post-rewrite                # tracked — shell shim, created by confluencer init
-      post-checkout               # tracked — shell shim, created by confluencer init
 
   docs/                           # local root (configured in .confluencer.json)
     index.md                      # content of the Confluence root anchor page
@@ -180,7 +180,7 @@ The index is committed as part of every sync commit so that any developer who cl
 
 The index must be updated atomically with any file operation it describes. A sync commit that renames a file must also update the index entry for that file in the same commit. The index and the filesystem must never be out of sync at any committed state.
 
-The three-way merge baseline is not stored in the index. It is obtained via `git show` at the most recent `chore(sync): confluence` commit that touched the file in question (see Concurrent Writer / Version Conflict Resolution).
+The branch-based pull uses the most recent `chore(sync): confluence` commit as the base point for the temporary sync branch. This commit is located via `gitutil/baseline.go`.
 
 ---
 
@@ -452,47 +452,31 @@ No confirmation prompt is issued: the developer's explicit `git rm` (push) or th
 
 ## Concurrent Writer / Version Conflict Resolution
 
-When Confluence content changes between syncs (whether from another developer, a direct Confluence edit, or a concurrent push), `confluencer push` detects and resolves the divergence via three-way merge, using Git history (not a cached snapshot in the index) to locate the baseline.
+When Confluence content changes between syncs, conflicts are resolved through git's native merge machinery via the branch-based pull approach. Push is a fire-and-forget operation that does not attempt local conflict resolution.
 
-**Proactive detection:** Before writing, `confluencer push` compares the fetched Confluence page version against the version stored in the index (`entry.version`). If they differ, a three-way merge is performed before the PUT — this catches Confluence-side edits without waiting for a 409. **Reactive fallback:** If a PUT returns 409 (e.g. a concurrent push landed between the fetch and the write), the same merge algorithm runs as a retry.
+### Push-side handling
 
-### Baseline lookup
+`confluencer push` fetches the current Confluence page version before writing. On a 409 (version conflict from a concurrent edit), it re-fetches the current version and retries the PUT once. If the retry also fails, the operation is queued to `.confluencer-pending`. Push does not perform three-way merges or modify local files.
 
-For page with local path `P`, the baseline is the content of `P` at the most recent commit where:
+### Pull-side handling (branch-based rebase)
 
-1. The commit message begins with `chore(sync): confluence`, and
-2. The commit modified `P` (either content change or rename terminus).
+`confluencer pull` writes Confluence changes on a temporary `confluencer-sync` branch and rebases the developer's branch onto it. This delegates conflict resolution entirely to git's merge machinery:
 
-`gitutil/baseline.go` resolves this via `git log --follow --grep='^chore(sync): confluence' -- P`, taking the first hit, then `git show <commit>:P` to read the bytes. If no such commit exists (the file was created by the developer and has never been synced), baseline is the empty string.
+- **Clean rebase**: Confluence changes and local changes are in different files or non-overlapping regions. The rebase succeeds silently.
+- **Conflict**: Confluence changes and local changes overlap. Git produces standard conflict markers in the working tree. The developer resolves them using their normal tools (editor, `git mergetool`, etc.) and completes the rebase.
+- **Rebase failure fallback**: If rebase fails entirely (e.g. complex history), pull falls back to `git merge` with the sync branch. Conflicts are surfaced as standard merge conflicts.
 
-### Merge algorithm (proactive version mismatch or 409)
-
-1. Fetch the current Confluence page content and version via `GET /content/{id}?expand=body.storage,version`.
-2. Convert fetched storage XML to Markdown via `cf_to_md` → `theirs`.
-3. Read local file → `ours`.
-4. Read baseline via `gitutil/baseline.go` → `base`.
-5. Run `git merge-file --stdout --no-diff3 ours base theirs`.
-6. If clean (exit 0):
-   - Write the merged content back to the local file.
-   - `md_to_cf(merged)` → `PUT /content/{id}` with the newly-fetched version + 1.
-   - If this retry PUT also fails, queue to `.confluencer-pending` and surface a warning.
-7. If conflicted (exit 1):
-   - Write the file with conflict markers.
-   - Emit: `[confluencer] CONFLICT: <path> has conflicting changes with Confluence. Resolve, commit, and re-push.`
-   - Queue to `.confluencer-pending` so it can be retried after the developer resolves.
-   - Continue processing other pages.
-
-This algorithm runs both proactively (version mismatch detected before PUT) and reactively (409 response from PUT). It applies uniformly regardless of the cause — concurrent push, live Confluence edit, or retry from `.confluencer-pending`.
+This approach replaces the previous custom three-way merge algorithm with git's battle-tested merge infrastructure, producing familiar conflict markers and workflows.
 
 ---
 
 ## Git Hook Behaviour
 
-To cover the full developer workflow (including `git pull --rebase`, fast-forward merges, and branch switches), pull-direction sync is installed on `post-merge`, `post-rewrite`, and `post-checkout`. Push-direction sync is on `pre-push`, which also runs a pull before pushing to ensure Confluence edits are captured even when no upstream Git changes triggered a hook.
+Pull-direction sync is installed on `post-commit`, `post-merge`, and `post-rewrite`. Push-direction sync is on `pre-push` as a fire-and-forget write to Confluence (no local commits or index updates). All pull-direction hooks are guarded by the `CONFLUENCER_HOOK_ACTIVE` environment variable to prevent recursion — pull performs git operations (branch, checkout, rebase, commit) that would otherwise re-trigger the hooks.
 
-### `pre-push` hook → `confluencer pull` + `confluencer push`
+### `pre-push` hook → `confluencer push`
 
-Fires before Git transmits commits to the remote. The hook shim runs `confluencer pull` first, then `confluencer push`, ensuring Confluence-side edits are fetched and merged before local changes are written to Confluence. Also works when invoked directly as `confluencer push` (without a Git push in progress); in direct mode, the pull is run inline before push processing begins.
+Fires before Git transmits commits to the remote. The hook shim runs `confluencer push`, which sends local changes to Confluence without creating any local commits. This means the hook never modifies the commit range being pushed, avoiding the fundamental problem of pre-push commits being excluded from the push.
 
 **Commit range detection:**
 
@@ -509,55 +493,69 @@ Fires before Git transmits commits to the remote. The hook shim runs `confluence
 4. For each range, compute the diff to identify `.md` files that were added, modified, renamed, or deleted.
 5. Filter out any `.md` file whose most recent modifying commit in the range carries the sync marker (`chore(sync): confluence`) in its message. These files' Confluence representations were already written when that content first entered the repo.
 6. Process each diff by its action type:
-   - **Deleted** (`D`): look up page ID in index, `DELETE /rest/api/content/{id}`, remove index entry. Already-deleted pages (404) are treated as success.
-   - **Renamed** (`R`): apply the Title Stability Rule to decide whether a title change is needed. Fetch current page for version number. Convert local content via `md_to_cf`. `PUT` with new title, body, and parent ID (derived from directory structure). Update index entry with new path, title, and parent.
-   - **Added** (`A`): if the file is already tracked in the index (e.g. created by `confluencer init`), treat as a content update. Otherwise, convert local content via `md_to_cf`, derive parent page ID from the directory's `index.md` entry (falling back to root page), `POST /rest/api/content` to create the page, and record new page ID in the index.
-   - **Modified** (`M`): fetch current page for version number. Compare the fetched version against the version stored in the index (`entry.version`). If they differ, Confluence was edited since the last sync — run the three-way merge algorithm proactively (see Concurrent Writer / Version Conflict Resolution) before writing. Convert local content (or merged content) via `md_to_cf`. `PUT /rest/api/content/{id}` with fetched version + 1. On 409, enter the three-way merge algorithm as a fallback.
+   - **Deleted** (`D`): look up page ID in index, `DELETE /rest/api/content/{id}`. Already-deleted pages (404) are treated as success.
+   - **Renamed** (`R`): apply the Title Stability Rule to decide whether a title change is needed. Fetch current page for version number. Convert local content via `md_to_cf`. `PUT` with new title, body, and parent ID (derived from directory structure).
+   - **Added** (`A`): if the file is already tracked in the index (e.g. created by `confluencer init`), treat as a content update. Otherwise, convert local content via `md_to_cf`, derive parent page ID from the directory's `index.md` entry (falling back to root page), `POST /rest/api/content` to create the page.
+   - **Modified** (`M`): fetch current page for version number. Convert local content via `md_to_cf`. `PUT /rest/api/content/{id}` with fetched version + 1. On 409, re-fetch the current version and retry once.
 7. On unrecoverable failure per item, append to `.confluencer-pending`, warn on stderr, continue.
-8. Save the updated index.
-9. Exit 0 in all cases except catastrophic errors (e.g. cannot read config file). The Git push proceeds.
+8. Exit 0 in all cases except catastrophic errors (e.g. cannot read config file). The Git push proceeds.
+
+Push does not save the index or create commits. Version tracking and index updates are pull's responsibility.
 
 **Note:** Promotions and demotions (flat file ↔ directory with `index.md`) are handled implicitly via Git's rename detection — Git sees the `git mv` as a rename, and the push processes it as a rename operation. Attachment uploads during push are not currently implemented; attachment changes propagate via pull-direction sync or manual pending queue entries.
 
+### `post-commit` hook → `confluencer pull`
+
+Fires after every `git commit`. Runs `confluencer pull` to fetch any Confluence-side changes and rebase them into the local branch. This ensures Confluence edits are captured before the next push, without requiring pull to run during the push itself. Guarded by `CONFLUENCER_HOOK_ACTIVE` to prevent recursion (pull creates its own commits during the branch-based rebase).
+
 ### `post-merge` hook → `confluencer pull`
 
-Fires after any merge completes (including fast-forward). Responsible for pulling Confluence changes into the local tree.
+Fires after any merge completes (including fast-forward). Responsible for pulling Confluence changes into the local tree. Guarded by `CONFLUENCER_HOOK_ACTIVE`.
 
 ### `post-rewrite` hook → `confluencer pull`
 
-Fires after `git rebase` and `git commit --amend`. Runs the same pull logic so that developers who rebase-based workflows don't miss Confluence sync.
+Fires after `git rebase` and `git commit --amend`. Runs the same pull logic so that developers with rebase-based workflows don't miss Confluence sync. Guarded by `CONFLUENCER_HOOK_ACTIVE`.
 
-### `post-checkout` hook → `confluencer pull`
+### Shared pull sequence (branch-based rebase)
 
-Fires after `git checkout` and `git switch`. The hook shim only runs on branch checkouts (flag `$3 = 1`), not file checkouts, to avoid unnecessary API calls when restoring individual files. This covers `git pull` fast-forward scenarios where `post-merge` does not fire, and branch switches where the developer may want fresh Confluence content.
+Invoked by `post-commit`, `post-merge`, `post-rewrite` (and `confluencer pull` directly):
 
-### Shared pull sequence
-
-Invoked by `post-merge`, `post-rewrite`, `post-checkout` (and `confluencer pull` directly):
-
-1. Acquire a short-lived file lock (`.confluencer/.pull.lock`) to prevent concurrent post-merge + post-rewrite double-fires. If lock is held, exit 0 silently — the holder will do the work. When invoked directly (not from a hook), a stale lock from a crashed run is removed and retried.
+1. Acquire a short-lived file lock (`.confluencer/.pull.lock`) to prevent concurrent hook double-fires. If lock is held, exit 0 silently — the holder will do the work. When invoked directly (not from a hook), a stale lock from a crashed run is removed and retried.
 2. Fetch the full Confluence page tree rooted at `confluence_root_page_id` via the REST API (structure only — bodies are not fetched at this stage).
 3. Load `.confluencer-index.json`.
 4. Compute the structural change set (see Typed change set table) — covers creates, deletes, renames, moves, promotions, and demotions.
 5. Detect content changes via version comparison: for each page in the tree that has no structural change, compare the Confluence version number against the version stored in the index. For pages with a version mismatch, fetch the body individually, convert via `cf_to_md`, and compare against the local file. Only pages with actual content differences are added as `content_changed` entries.
-6. Resolve each change:
-   - `deleted`: remove files and index entries.
-   - `renamed_in_place` / `moved` / `ancestor_renamed` / `promoted` / `demoted`: plan two-phase renames, execute `git mv`s, move attachments.
-   - `content_changed`: write new Markdown. If the local file has uncommitted changes, run the three-way merge (same algorithm as push 409) using the Git-backed baseline.
-   - `created`: write new file at computed path, add index entry.
-   - `orphaned` / `missing_unknown`: log warnings, take no action.
-6. Download any new or changed attachments to `_attachments/<page-path>/`.
-7. Update the index (including version numbers for all pages in the tree).
-8. If the change set is non-empty:
-   - `git add` all changed, renamed, new, and deleted files plus attachments and the updated index.
-   - `git commit -m "chore(sync): confluence"`.
-9. Release the lock. Exit 0.
+6. If the change set is empty, update index version numbers and exit.
+7. **Branch-based application:**
+   a. Record the current branch name.
+   b. Stash any uncommitted changes if present.
+   c. Find the base SHA — the last `chore(sync): confluence` commit, or HEAD if none exists.
+   d. Create a temporary `confluencer-sync` branch at the base SHA.
+   e. Check out the sync branch.
+   f. Apply all changes on the sync branch:
+      - `deleted`: remove files and index entries.
+      - `renamed_in_place` / `moved` / `ancestor_renamed` / `promoted` / `demoted`: execute `git mv`s, move attachments.
+      - `content_changed`: write new Markdown content.
+      - `created`: write new file at computed path, add index entry.
+      - `orphaned` / `missing_unknown`: log warnings, take no action.
+   g. Download any new or changed attachments to `_attachments/<page-path>/`.
+   h. Update the index (including version numbers for all pages in the tree).
+   i. `git add` all changed files plus the updated index.
+   j. `git commit -m "chore(sync): confluence"`.
+   k. Check out the original branch.
+   l. Rebase the original branch onto the sync branch, leveraging git's native merge machinery for conflict resolution.
+   m. If rebase fails (conflicts), fall back to `git merge` and emit conflict warnings.
+   n. Delete the `confluencer-sync` branch.
+   o. Pop the stash if one was created.
+8. Release the lock. Exit 0.
 
-**`post-merge` specifics**: the sync commit is appended after the merge commit. This is a minor behavioural change from the previous `pre-merge-commit` design — sync no longer folds into the merge commit itself. This is acceptable because (a) it buys coverage of fast-forward merges and rebases, (b) it makes the sync commit atomically attributable in log history, and (c) the merge commit itself remains clean.
+This branch-based approach leverages git's merge machinery instead of a custom three-way merge algorithm. Conflicts are surfaced as standard git merge conflicts that developers resolve with their normal tools.
 
-**`post-rewrite` specifics**: after a rebase, the rewrite may have clobbered prior sync commits' messages if the developer squashed or reworded them. The sync commit emitted by the post-rewrite pull re-establishes the marker on the new tip. Potential double-sync across post-merge + post-rewrite + post-checkout is prevented by the file lock.
+**`post-commit` specifics**: fires after every commit, adding 2-5 seconds of latency for the Confluence API call. Fails silently if Confluence is unreachable — the developer is never blocked from committing.
 
-**`post-checkout` specifics**: only fires on branch checkouts (`$3 = 1`), not file restores. This covers `git pull` fast-forward scenarios where the working tree moves forward without triggering `post-merge`, and branch switches where Confluence may have been edited since the branch was last active.
+**`post-merge` specifics**: the sync commit is rebased onto the merge commit, keeping the history linear.
+
+**`post-rewrite` specifics**: after a rebase, the rewrite may have clobbered prior sync commits' messages if the developer squashed or reworded them. The sync commit emitted by the post-rewrite pull re-establishes the marker on the new tip. Potential double-sync across post-commit + post-merge + post-rewrite is prevented by the file lock and the `CONFLUENCER_HOOK_ACTIVE` environment variable guard.
 
 ---
 
@@ -586,7 +584,7 @@ confluencer init --page-id <root-page-id> [--local-root <path>]
 7. Write `.confluencer.json` including the cached space key.
 8. Write `.confluencer-index.json`.
 9. Append to `.gitignore` if entries for `.env` and `.confluencer-pending` are not already present.
-10. Create `.confluencer/hooks/` with hook shims for `pre-push`, `post-merge`, `post-rewrite`, and `post-checkout`.
+10. Create `.confluencer/hooks/` with hook shims for `pre-push`, `post-commit`, `post-merge`, and `post-rewrite`.
 11. Install hooks into `.git/hooks/` (same operation as `confluencer install`).
 12. Print a summary.
 13. Do not make any Git commits. Leave staging to the developer.
@@ -820,15 +818,11 @@ Body: multipart file upload (field name: "file")
 
 ### Version conflict during push
 
-See Concurrent Writer / Version Conflict Resolution. Resolved via in-place three-way merge. Only written to `.confluencer-pending` if all automatic retries fail; only left as a working-tree conflict if the three-way merge produces textual conflict markers.
+On a 409 from Confluence, push re-fetches the current page version and retries the PUT once. If the retry also fails, the operation is queued to `.confluencer-pending`. Push does not modify local files or perform three-way merges.
 
 ### Conflict during pull
 
-When a Confluence page's content differs from the local file and the local file has uncommitted edits on top of the last sync baseline:
-
-1. Run the same three-way merge algorithm (`ours` = local, `theirs` = Confluence, `base` = git-show from last sync commit).
-2. On clean merge, write merged content to the file, stage, include in the sync commit.
-3. On conflict markers, stage the file, emit: `[confluencer] CONFLICT: <path> has conflicting changes. Resolve before pushing.`
+Pull writes Confluence changes on a temporary branch and rebases the developer's branch onto it. Conflicts are surfaced as standard git merge/rebase conflicts. The developer resolves them with their normal tools and completes the rebase or merge.
 
 ---
 
@@ -851,14 +845,28 @@ Created automatically by `confluencer init`. The shims invoke `confluencer` from
 ```sh
 #!/bin/sh
 set -e
-confluencer pull
 confluencer push
+```
+
+**`post-commit`:**
+```sh
+#!/bin/sh
+set -e
+if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+  exit 0
+fi
+export CONFLUENCER_HOOK_ACTIVE=1
+confluencer pull
 ```
 
 **`post-merge`:**
 ```sh
 #!/bin/sh
 set -e
+if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+  exit 0
+fi
+export CONFLUENCER_HOOK_ACTIVE=1
 confluencer pull
 ```
 
@@ -866,21 +874,16 @@ confluencer pull
 ```sh
 #!/bin/sh
 set -e
-confluencer pull
-```
-
-**`post-checkout`:**
-```sh
-#!/bin/sh
-# Only run on branch checkouts (flag=1), not file checkouts.
-if [ "$3" = "1" ]; then
-  confluencer pull
+if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+  exit 0
 fi
+export CONFLUENCER_HOOK_ACTIVE=1
+confluencer pull
 ```
 
 ### `confluencer install`
 
-Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-merge`, `.confluencer/hooks/post-rewrite`, and `.confluencer/hooks/post-checkout` into `.git/hooks/` and marks them executable. Idempotent — safe to run multiple times. Used by developers who clone an existing confluencer-managed repository and need to activate the hooks locally.
+Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-commit`, `.confluencer/hooks/post-merge`, and `.confluencer/hooks/post-rewrite` into `.git/hooks/` and marks them executable. Idempotent — safe to run multiple times. Used by developers who clone an existing confluencer-managed repository and need to activate the hooks locally.
 
 ---
 
@@ -890,9 +893,9 @@ Copies (not symlinks) `.confluencer/hooks/pre-push`, `.confluencer/hooks/post-me
 |---|---|
 | `confluencer init --page-id <id> [--local-root <path>]` | Populate local repo from existing Confluence tree. Writes `.confluencer.json`, `.confluencer-index.json`, `.confluencer/hooks/`, and installs hooks into `.git/hooks/`. Does not commit. |
 | `confluencer install` | Copy hook shims from `.confluencer/hooks/` into `.git/hooks/`. Used after cloning an existing confluencer-managed repo. |
-| `confluencer push` | Invoked by pre-push hook. Write changed, added, renamed, and deleted Markdown to Confluence. Update index. Drain `.confluencer-pending` first. |
+| `confluencer push` | Invoked by pre-push hook. Fire-and-forget write of changed, added, renamed, and deleted Markdown to Confluence. Drain `.confluencer-pending` first. Does not modify local files or create commits. |
 | `confluencer push --retry` | Drain `.confluencer-pending` outside of a Git push. |
-| `confluencer pull` | Invoked by post-merge, post-rewrite, and post-checkout hooks (and by pre-push before pushing). Fetch Confluence tree, apply typed change set, commit as `chore(sync): confluence`. |
+| `confluencer pull` | Invoked by post-commit, post-merge, and post-rewrite hooks. Fetch Confluence tree, apply typed change set on a temporary branch, rebase current branch onto it. Commits as `chore(sync): confluence`. |
 | `confluencer status` | Report pending writes, orphaned pages, and pending deletions. |
 | `confluencer version` | Print version, commit, and build date. |
 
@@ -932,7 +935,7 @@ cp .env.example .env
 confluencer install
 ```
 
-After either path, all `git pull`, `git pull --rebase`, `git merge`, `git rebase`, and `git push` operations automatically sync with Confluence. No further configuration is required.
+After either path, all `git commit`, `git pull`, `git pull --rebase`, `git merge`, `git rebase`, and `git push` operations automatically sync with Confluence. No further configuration is required.
 
 ---
 
@@ -941,7 +944,7 @@ After either path, all `git pull`, `git pull --rebase`, `git merge`, `git rebase
 1. **Round-trip idempotency**: `Normalise(cf_to_md(md_to_cf(x))) == Normalise(x)` for supported constructs; unsupported constructs round-trip byte-for-byte via the Confluence-native fence. Round-trip tests pass before any hook orchestration is written.
 2. **Page ID is the stable identity**: Rename detection, history preservation, and index management key on Confluence page IDs. File paths and page titles are derived, mutable properties.
 3. **Index and filesystem are always consistent at commit boundaries**: Index entries are updated only for successful operations. Failed push operations are recorded in `.confluencer-pending` and their index entries are updated when the pending entry drains. No committed state has the index out of sync with the filesystem.
-4. **Sync commits are attributable**: All commits produced by `confluencer pull` carry the message prefix `chore(sync): confluence`. Human-authored commits must never use this prefix. It is the sole mechanism for sync-commit identification and the sole key for three-way merge baseline lookup.
+4. **Sync commits are attributable**: All commits produced by `confluencer pull` carry the message prefix `chore(sync): confluence`. Human-authored commits must never use this prefix. It is the sole mechanism for sync-commit identification and the base point for branch-based pull operations.
 5. **Renames use `git mv`**: All rename, move, promotion, and demotion operations use `git mv` so that history is traceable via `git log --follow`. Multi-file renames use the two-phase stash-and-place protocol to avoid collisions.
 6. **Attachments are co-committed**: A sync commit that modifies a `.md` includes all attachment files referenced by it, under `_attachments/<page-path>/`, in the same commit.
 7. **Push never blocks permanently**: Any Confluence write failure results in the push proceeding and the failure being queued in `.confluencer-pending`. The developer is never left unable to push.

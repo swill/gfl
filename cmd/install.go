@@ -10,12 +10,12 @@ import (
 )
 
 // hookNames lists the Git hooks that confluencer manages.
-var hookNames = []string{"pre-push", "post-merge", "post-rewrite", "post-checkout"}
+var hookNames = []string{"pre-push", "post-commit", "post-merge", "post-rewrite"}
 
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Copy Git hook shims into .git/hooks/",
-	Long: `Copies the pre-push, post-merge, and post-rewrite shims from
+	Long: `Copies the pre-push, post-commit, post-merge, and post-rewrite shims from
 .confluencer/hooks/ into .git/hooks/ and marks them executable. The shims
 resolve the binary path at runtime, so subsequent upgrades do not require
 re-installation. Idempotent.`,

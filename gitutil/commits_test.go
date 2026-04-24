@@ -1,6 +1,7 @@
 package gitutil
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -181,6 +182,21 @@ func TestLastSyncCommit(t *testing.T) {
 	}
 	if sha != syncSHA {
 		t.Errorf("got %s, want %s", sha, syncSHA)
+	}
+}
+
+func TestGitDir(t *testing.T) {
+	dir := initTestRepo(t)
+
+	gitDir, err := GitDir(dir)
+	if err != nil {
+		t.Fatalf("GitDir: %v", err)
+	}
+	if !strings.HasSuffix(gitDir, "/.git") {
+		t.Errorf("gitDir = %q, expected trailing /.git", gitDir)
+	}
+	if !filepath.IsAbs(gitDir) {
+		t.Errorf("gitDir = %q, expected absolute path", gitDir)
 	}
 }
 

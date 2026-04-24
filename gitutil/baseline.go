@@ -27,6 +27,19 @@ func FindSyncCommit(repoDir, filePath string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// LastCommitTouching returns the SHA of the most recent commit that modified
+// filePath on the current branch, or empty string if no such commit exists.
+// filePath is relative to the repository root.
+func LastCommitTouching(repoDir, filePath string) (string, error) {
+	cmd := exec.Command("git", "log", "--format=%H", "-1", "--", filePath)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git log -1 %s: %w", filePath, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // ShowFile returns the content of a file at a specific commit.
 // Both commitSHA and filePath are required. filePath is relative to the repo root.
 func ShowFile(repoDir, commitSHA, filePath string) (string, error) {
