@@ -34,7 +34,7 @@ Pre-compiled binaries are published as GitHub release artifacts for:
 - `darwin/arm64`
 - `windows/amd64`
 
-In a consuming repository, the `.confluencer/install.sh` script automates fetching the correct binary for the current platform.
+Download the artifact for your platform and place it on your `PATH`. `confluencer` is installed per-developer, not bundled with consuming repositories.
 
 ## Setup
 
@@ -59,7 +59,7 @@ This fetches the full page tree, converts each page to Markdown, downloads attac
 - `docs/` (or your chosen `--local-root`) — the Markdown file tree
 - `.confluencer.json` — configuration (root page ID, space key, local root)
 - `.confluencer-index.json` — the page ID to file path mapping
-- `.gitignore` entries for `.env`, `.confluencer-pending`, and `.confluencer/bin/`
+- `.gitignore` entries for `.env` and `.confluencer-pending`
 
 Review the output, then `git add` and commit.
 
@@ -81,8 +81,8 @@ cd <repo>
 cp .env.example .env
 # Edit .env with your Confluence credentials
 
-# Install binary and hooks
-./.confluencer/install.sh
+# Install Git hooks (assumes `confluencer` is already on your PATH — see Installation)
+confluencer install
 ```
 
 After this, all `git push`, `git pull`, `git pull --rebase`, and `git merge` operations automatically sync with Confluence.
