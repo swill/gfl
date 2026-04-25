@@ -35,18 +35,39 @@ import (
 // pass through verbatim so that unsupported constructs are preserved.
 func Normalise(md string) string {
 	src := preNormalise([]byte(md))
-	reader := text.NewReader(src)
+
+	// Split off any front-matter so the body parses cleanly through goldmark
+	// (otherwise the leading `---` would parse as a thematic break followed by
+	// stray "key: value" paragraphs). On malformed front-matter, fall back to
+	// treating the whole input as body — preserves user content; the surfaced
+	// error from ExtractFrontMatter is intentionally swallowed here so that
+	// Normalise stays total. Callers that need to validate front-matter should
+	// call ExtractFrontMatter directly.
+	fm, body, err := ExtractFrontMatter(string(src))
+	if err != nil {
+		fm = FrontMatter{}
+		body = string(src)
+	}
+	bodyBytes := []byte(body)
+
+	reader := text.NewReader(bodyBytes)
 	doc := normaliserMD.Parser().Parse(reader)
 
-	r := &mdRenderer{source: src}
+	r := &mdRenderer{source: bodyBytes}
 	out := r.renderDocument(doc)
 
-	// Ensure exactly one trailing newline.
+	// Ensure exactly one trailing newline on the body, except when the body
+	// is empty (front-matter-only file).
 	out = strings.TrimRight(out, "\n")
-	if out == "" {
-		return ""
+	var bodyOut string
+	if out != "" {
+		bodyOut = out + "\n"
 	}
-	return out + "\n"
+
+	if fm.IsEmpty() {
+		return bodyOut
+	}
+	return ApplyFrontMatter(fm, bodyOut)
 }
 
 // NormaliseBytes is the []byte convenience for Normalise.
