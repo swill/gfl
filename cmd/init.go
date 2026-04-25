@@ -9,8 +9,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/swill/confluencer/api"
 	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/index"
-	"github.com/swill/confluencer/lexer"
 	"github.com/swill/confluencer/tree"
 )
 
@@ -23,8 +21,12 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Populate a local repo from an existing Confluence page tree",
 	Long: `Fetches a Confluence page tree rooted at --page-id and writes it to
---local-root as a tree of Markdown files. Also writes .confluencer.json
-(including the cached space key) and .confluencer-index.json.`,
+--local-root as a tree of Markdown files. Each file gets a confluence_page_id
+and confluence_version front-matter block. Also writes .confluencer.json
+(including the cached space key) and the hook shims, then installs them.
+
+After init, review the files and create your initial commit. The first
+post-commit hook will seed the local 'confluence' branch from your tree.`,
 	RunE: runInit,
 }
 
@@ -42,20 +44,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.OutOrStdout()
 
-	// Check that .confluencer.json does not already exist.
 	cfgPath := filepath.Join(root, configFile)
 	if _, err := os.Stat(cfgPath); err == nil {
 		return fmt.Errorf("%s already exists — confluencer is already initialised in this repository", configFile)
 	}
 
-	// Ensure local root has trailing slash for consistency.
 	localRoot := initLocalRoot
 	if !strings.HasSuffix(localRoot, "/") {
 		localRoot += "/"
 	}
 	attachmentsDir := localRoot + "_attachments"
 
-	// Load credentials.
 	creds, err := cfgpkg.LoadCredentials(root)
 	if err != nil {
 		return err
@@ -65,7 +64,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	client := api.NewClient(creds.BaseURL, creds.User, creds.APIToken)
 
-	// Fetch the full tree with body content.
 	ct, err := client.FetchTree(initPageID, true)
 	if err != nil {
 		return fmt.Errorf("fetch tree: %w", err)
@@ -73,14 +71,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(out, "Found %d pages.\n", ct.Size())
 
-	// Compute local paths from the tree.
 	pm := tree.ComputePaths(ct, localRoot)
 
-	// Build the index and write files.
-	idx := index.New()
-	pageResolver := newInitPageResolver(ct, pm)
-	var fileCount int
+	cfg := &cfgpkg.Config{
+		RootPageID:     initPageID,
+		SpaceKey:       ct.Root.SpaceKey,
+		LocalRoot:      localRoot,
+		AttachmentsDir: attachmentsDir,
+	}
 
+	var fileCount int
 	ct.Walk(func(n *tree.CfNode) {
 		localPath, ok := pm.Path(n.PageID)
 		if !ok {
@@ -88,40 +88,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return
 		}
 
-		// Convert storage XML to Markdown.
-		md, err := lexer.CfToMd(n.Body, lexer.CfToMdOpts{
-			Pages:       pageResolver,
-			Attachments: &stubAttachmentResolver{localPath: localPath, attachmentsDir: attachmentsDir, localRoot: localRoot},
-		})
+		opts := resolverForPage(localPath, cfg, ct, pm)
+		content, err := renderPage(n.PageID, n.Body, n.Version, opts)
 		if err != nil {
-			fmt.Fprintf(out, "  WARNING: conversion failed for %s (%s): %v\n", n.PageID, n.Title, err)
-			md = ""
+			fmt.Fprintf(out, "  WARNING: %v\n", err)
+			content = ""
 		}
 
-		// Write the Markdown file.
 		absPath := filepath.Join(root, filepath.FromSlash(localPath))
 		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 			fmt.Fprintf(out, "  ERROR: mkdir for %s: %v\n", localPath, err)
 			return
 		}
-		if err := os.WriteFile(absPath, []byte(md), 0o644); err != nil {
+		if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
 			fmt.Fprintf(out, "  ERROR: write %s: %v\n", localPath, err)
 			return
 		}
-
-		// Add to index.
-		idx.Add(index.Entry{
-			PageID:       n.PageID,
-			Title:        n.Title,
-			LocalPath:    localPath,
-			ParentPageID: n.ParentPageID,
-			Version:      n.Version,
-		})
-
 		fileCount++
 	})
 
-	// Download attachments.
+	// Download attachments for every page.
 	attCount := 0
 	ct.Walk(func(n *tree.CfNode) {
 		atts, err := client.GetAttachments(n.PageID, "")
@@ -132,13 +118,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if len(atts) == 0 {
 			return
 		}
-
 		localPath, ok := pm.Path(n.PageID)
 		if !ok {
 			return
 		}
 		attDir := tree.AttachmentDir(localPath, localRoot, attachmentsDir)
-
 		for _, att := range atts {
 			data, err := client.DownloadAttachment(att.DownloadPath)
 			if err != nil {
@@ -158,32 +142,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	})
 
-	// Write .confluencer.json.
-	cfg := &cfgpkg.Config{
-		RootPageID:     initPageID,
-		SpaceKey:       ct.Root.SpaceKey,
-		LocalRoot:      localRoot,
-		AttachmentsDir: attachmentsDir,
-	}
 	if err := cfg.Save(cfgPath); err != nil {
 		return fmt.Errorf("write %s: %w", configFile, err)
 	}
 
-	// Write .confluencer-index.json.
-	idxPath := filepath.Join(root, indexFile)
-	if err := idx.Save(idxPath); err != nil {
-		return fmt.Errorf("write %s: %w", indexFile, err)
-	}
-
-	// Write .gitignore stub if it doesn't exist.
 	writeGitignoreStub(root)
 
-	// Create .confluencer/hooks/ with hook shims.
 	if err := writeHookShims(root); err != nil {
 		return fmt.Errorf("write hook shims: %w", err)
 	}
-
-	// Install hooks into .git/hooks/.
 	if err := installHooks(root, out); err != nil {
 		return fmt.Errorf("install hooks: %w", err)
 	}
@@ -192,14 +159,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  Pages:       %d\n", fileCount)
 	fmt.Fprintf(out, "  Attachments: %d\n", attCount)
 	fmt.Fprintf(out, "  Config:      %s\n", configFile)
-	fmt.Fprintf(out, "  Index:       %s\n", indexFile)
 	fmt.Fprintf(out, "  Hooks:       .confluencer/hooks/ → .git/hooks/\n")
-	fmt.Fprintln(out, "\nReview the files, then git add and commit.")
+	fmt.Fprintln(out, "\nReview the files, then `git add` and commit.")
 
 	return nil
 }
 
 // writeHookShims creates .confluencer/hooks/ and writes the Git hook shims.
+// pre-push runs push (which is read-only on the local working tree); the
+// post-* hooks run pull, guarded against re-entry by CONFLUENCER_HOOK_ACTIVE
+// since pull creates its own commits on the confluence branch.
 func writeHookShims(root string) error {
 	hooksDir := filepath.Join(root, ".confluencer", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -218,7 +187,6 @@ export CONFLUENCER_HOOK_ACTIVE=1
 		"post-merge":   "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
 		"post-rewrite": "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
 	}
-
 	for name, content := range shims {
 		path := filepath.Join(hooksDir, name)
 		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
@@ -228,21 +196,20 @@ export CONFLUENCER_HOOK_ACTIVE=1
 	return nil
 }
 
-// writeGitignoreStub appends confluencer entries to .gitignore if they're
-// not already present. Does not fail — best effort.
+// writeGitignoreStub appends confluencer entries to .gitignore if missing.
+// Best effort — does not fail the init on errors.
 func writeGitignoreStub(root string) {
 	gitignorePath := filepath.Join(root, ".gitignore")
 	existing, _ := os.ReadFile(gitignorePath)
 	content := string(existing)
 
-	entries := []string{".env", ".confluencer-pending"}
+	entries := []string{".env"}
 	var toAdd []string
 	for _, e := range entries {
 		if !strings.Contains(content, e) {
 			toAdd = append(toAdd, e)
 		}
 	}
-
 	if len(toAdd) == 0 {
 		return
 	}
@@ -252,8 +219,6 @@ func writeGitignoreStub(root string) {
 		return
 	}
 	defer f.Close()
-
-	// Add a newline separator if the file doesn't end with one.
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		f.WriteString("\n")
 	}
@@ -263,38 +228,8 @@ func writeGitignoreStub(root string) {
 	}
 }
 
-// initPageResolver resolves cross-page links during init.
-type initPageResolver struct {
-	tree  *tree.CfTree
-	paths *tree.PathMap
-}
-
-func newInitPageResolver(ct *tree.CfTree, pm *tree.PathMap) *initPageResolver {
-	return &initPageResolver{tree: ct, paths: pm}
-}
-
-func (r *initPageResolver) ResolvePageByTitle(title, spaceKey string) (localPath string, ok bool) {
-	// Walk the tree to find by title.
-	var found *tree.CfNode
-	r.tree.Walk(func(n *tree.CfNode) {
-		if found != nil {
-			return
-		}
-		if n.Title == title {
-			found = n
-		}
-	})
-	if found == nil {
-		return "", false
-	}
-	p, pOk := r.paths.Path(found.PageID)
-	if !pOk {
-		return "", false
-	}
-	return p, true
-}
-
-// stubAttachmentResolver resolves attachment image references during init.
+// stubAttachmentResolver resolves attachment image references during
+// cf_to_md conversion. It's used by both init and pull via resolverForPage.
 type stubAttachmentResolver struct {
 	localPath      string
 	attachmentsDir string

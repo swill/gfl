@@ -4,28 +4,26 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/swill/confluencer/api"
 	cfgpkg "github.com/swill/confluencer/config"
 	"github.com/swill/confluencer/gitutil"
-	"github.com/swill/confluencer/index"
-	"github.com/swill/confluencer/lexer"
 	"github.com/swill/confluencer/tree"
 )
 
-const syncBranch = "confluencer-sync"
-
 var pullCmd = &cobra.Command{
 	Use:   "pull",
-	Short: "Fetch Confluence tree, apply typed change set locally, commit as sync",
-	Long: `Fetches the full Confluence page tree, computes a typed change set
-against the local index and filesystem, writes changes on a temporary branch,
-and rebases the current branch onto it. This uses git's merge machinery
-for safe conflict resolution.`,
+	Short: "Sync Confluence state into the local confluence branch and merge it",
+	Long: `Updates the local 'confluence' branch to mirror the current state of
+Confluence (creating, updating, renaming, or deleting Markdown files as
+needed), commits the result, and merges it into the current working branch.
+
+Conflicts during the merge are left for you to resolve with your normal
+git tools (git status, your editor, git merge --continue / --abort).`,
 	RunE: runPull,
 }
 
@@ -40,9 +38,6 @@ func runPull(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.ErrOrStderr()
 
-	// Acquire file lock to prevent double-fires from concurrent hooks.
-	// Kept under .git/ so it is never visible to `git status` and cannot
-	// make HasUncommittedChanges return a false positive during the hook.
 	gitDir, err := gitutil.GitDir(root)
 	if err != nil {
 		return err
@@ -57,175 +52,22 @@ func runPull(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("acquire pull lock: %w", err)
 			}
 		} else {
+			// Another pull is in progress (e.g. fired by a sibling hook).
+			// The holder will do the work; exit silently.
 			return nil
 		}
 	}
 	defer releaseLock(lock, lockPath)
 
-	fmt.Fprintf(out, "[confluencer] fetching page tree from Confluence...\n")
-
-	// Load config.
 	cfg, err := cfgpkg.LoadConfig(filepath.Join(root, configFile))
 	if err != nil {
 		return err
 	}
-
-	// Load credentials.
 	creds, err := cfgpkg.LoadCredentials(root)
 	if err != nil {
 		return err
 	}
 
-	// Load index.
-	idx, err := index.Load(filepath.Join(root, indexFile))
-	if err != nil {
-		return fmt.Errorf("load index: %w", err)
-	}
-
-	client := api.NewClient(creds.BaseURL, creds.User, creds.APIToken)
-
-	// Fetch the full tree (without bodies — we'll fetch individually for changed pages).
-	ct, err := client.FetchTree(cfg.RootPageID, false)
-	if err != nil {
-		return fmt.Errorf("fetch tree: %w", err)
-	}
-
-	// Compute expected paths from the live tree.
-	pm := tree.ComputePaths(ct, cfg.LocalRoot)
-
-	// Build index entries for Diff.
-	var indexEntries []tree.IndexEntry
-	for _, e := range idx.Entries() {
-		indexEntries = append(indexEntries, tree.IndexEntry{
-			PageID:       e.PageID,
-			Title:        e.Title,
-			LocalPath:    e.LocalPath,
-			ParentPageID: e.ParentPageID,
-		})
-	}
-
-	// Resolve missing pages (in index but not in tree).
-	var missingPages []tree.MissingPage
-	for _, e := range idx.Entries() {
-		if ct.Contains(e.PageID) {
-			continue
-		}
-		_, err := client.GetPage(e.PageID)
-		if err != nil {
-			if api.IsNotFound(err) {
-				missingPages = append(missingPages, tree.MissingPage{
-					PageID: e.PageID, Status: tree.StatusDeleted,
-				})
-			} else {
-				fmt.Fprintf(out, "[confluencer] WARNING: cannot determine status of page %s: %v\n", e.PageID, err)
-				missingPages = append(missingPages, tree.MissingPage{
-					PageID: e.PageID, Status: tree.StatusUnknown,
-				})
-			}
-		} else {
-			missingPages = append(missingPages, tree.MissingPage{
-				PageID: e.PageID, Status: tree.StatusOrphaned,
-			})
-		}
-	}
-
-	// Compute the typed change set (structural changes only).
-	changes := tree.Diff(tree.DiffInput{
-		Tree:    ct,
-		Paths:   pm,
-		Index:   indexEntries,
-		Missing: missingPages,
-	})
-
-	// Detect content changes via Confluence version comparison.
-	structuralIDs := make(map[string]bool, len(changes))
-	for _, c := range changes {
-		structuralIDs[c.PageID] = true
-	}
-
-	pageRes := newPullPageResolver(ct, pm)
-
-	ct.Walk(func(node *tree.CfNode) {
-		if structuralIDs[node.PageID] {
-			return
-		}
-		entry, ok := idx.ByPageID(node.PageID)
-		if !ok {
-			return
-		}
-		if entry.Version == node.Version {
-			return
-		}
-
-		page, err := client.GetPage(node.PageID)
-		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s for content check: %v\n", node.PageID, err)
-			return
-		}
-
-		attRes := &stubAttachmentResolver{
-			localPath: entry.LocalPath, attachmentsDir: cfg.AttachmentsDir, localRoot: cfg.LocalRoot,
-		}
-		md, err := lexer.CfToMd(page.Body, lexer.CfToMdOpts{
-			Pages: pageRes, Attachments: attRes,
-		})
-		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: convert page %s: %v\n", node.PageID, err)
-			return
-		}
-
-		absPath := filepath.Join(root, filepath.FromSlash(entry.LocalPath))
-		localContent, err := os.ReadFile(absPath)
-		if err != nil {
-			return
-		}
-
-		if string(localContent) == md {
-			idx.UpdateVersion(node.PageID, page.Version)
-			return
-		}
-
-		changes = append(changes, tree.Change{
-			Type:    tree.ContentChanged,
-			PageID:  node.PageID,
-			Title:   node.Title,
-			OldPath: entry.LocalPath,
-			NewPath: entry.LocalPath,
-		})
-	})
-
-	if len(changes) == 0 {
-		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
-		return nil
-	}
-
-	// Warn about orphaned and unknown pages (informational, no file changes).
-	for _, c := range changes {
-		switch c.Type {
-		case tree.Orphaned:
-			fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) is orphaned — moved outside sync scope\n", c.PageID, c.Title)
-		case tree.MissingUnknown:
-			fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) — status could not be determined, skipping\n", c.PageID, c.Title)
-		}
-	}
-
-	// Filter to only actionable changes.
-	var actionable []tree.Change
-	for _, c := range changes {
-		if c.Type != tree.Orphaned && c.Type != tree.MissingUnknown {
-			actionable = append(actionable, c)
-		}
-	}
-	if len(actionable) == 0 {
-		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
-		return nil
-	}
-
-	fmt.Fprintf(out, "[confluencer] found %d change(s) to apply\n", len(actionable))
-
-	// --- Branch-based pull: write Confluence changes on a temp branch, then rebase ---
-
-	// Remember the current branch so we can return to it.
 	origBranch, err := gitutil.CurrentBranch(root)
 	if err != nil {
 		return fmt.Errorf("get current branch: %w", err)
@@ -233,261 +75,367 @@ func runPull(cmd *cobra.Command, args []string) error {
 	if origBranch == "" {
 		return fmt.Errorf("cannot pull in detached HEAD state")
 	}
-
-	// Stash any uncommitted changes so we can switch branches.
-	hasChanges, _ := gitutil.HasUncommittedChanges(root)
-	if hasChanges {
-		if err := gitutil.StashPush(root); err != nil {
-			return fmt.Errorf("stash uncommitted changes: %w", err)
-		}
-		defer func() {
-			if popErr := gitutil.StashPop(root); popErr != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: stash pop failed: %v\n", popErr)
-			}
-		}()
+	if origBranch == confluenceBranch {
+		return fmt.Errorf("currently on the %q branch — switch to your work branch before running pull", confluenceBranch)
 	}
 
-	// Find the base commit for the sync branch. This commit defines the
-	// "last-known in-sync with Confluence" point — git's 3-way merge uses it
-	// as the common ancestor when rebasing the developer's work onto the
-	// sync branch, which is what surfaces genuine edit conflicts.
-	//
-	// Preference order:
-	//   1. Last `chore(sync): confluence` commit — the canonical sync point.
-	//   2. Last commit that modified `.confluencer-index.json` — the index
-	//      is only rewritten by `confluencer init` and `confluencer pull`,
-	//      so this always points at a committed in-sync state.
-	//
-	// Falling back to HEAD here is wrong: HEAD may contain local edits that
-	// diverged from Confluence, which would cause the sync branch to
-	// silently overwrite them during fast-forward.
-	baseSHA, err := gitutil.LastSyncCommit(root)
-	if err != nil || baseSHA == "" {
-		baseSHA, err = gitutil.LastCommitTouching(root, indexFile)
-		if err != nil {
-			return fmt.Errorf("find baseline commit: %w", err)
-		}
-		if baseSHA == "" {
-			return fmt.Errorf("no baseline commit found: commit %s (from `confluencer init`) before running pull", indexFile)
-		}
+	// Refuse to operate with a dirty tree on the working branch — tracked
+	// changes might collide with the merge from confluence. Untracked files
+	// are fine: git carries them across checkouts as long as they don't
+	// shadow tracked files on the destination branch.
+	if clean, err := gitutil.IsClean(root); err != nil {
+		return err
+	} else if !clean {
+		return fmt.Errorf("working tree has uncommitted changes — commit or stash them before running pull")
 	}
 
-	// Clean up any leftover sync branch from a prior interrupted run.
-	gitutil.DeleteBranch(root, syncBranch)
-
-	// Create and switch to the temp sync branch.
-	if err := gitutil.CreateBranch(root, syncBranch, baseSHA); err != nil {
-		return fmt.Errorf("create sync branch: %w", err)
-	}
-	if err := gitutil.Checkout(root, syncBranch); err != nil {
-		gitutil.DeleteBranch(root, syncBranch)
-		return fmt.Errorf("checkout sync branch: %w", err)
+	// Seed the confluence branch on first run. After this it persists.
+	if err := gitutil.EnsureBranchFromHead(root, confluenceBranch); err != nil {
+		return fmt.Errorf("ensure %s branch: %w", confluenceBranch, err)
 	}
 
-	// Ensure we always return to the original branch and clean up.
-	cleanup := func() {
-		gitutil.Checkout(root, origBranch)
-		gitutil.DeleteBranch(root, syncBranch)
+	fmt.Fprintf(out, "[confluencer] fetching page tree from Confluence...\n")
+
+	client := api.NewClient(creds.BaseURL, creds.User, creds.APIToken)
+
+	ct, err := client.FetchTree(cfg.RootPageID, false)
+	if err != nil {
+		return fmt.Errorf("fetch tree: %w", err)
+	}
+	pm := tree.ComputePaths(ct, cfg.LocalRoot)
+
+	// Switch to the confluence branch to apply Confluence's state to it.
+	if err := gitutil.Checkout(root, confluenceBranch); err != nil {
+		return fmt.Errorf("checkout %s: %w", confluenceBranch, err)
+	}
+	// We have to make sure we always end up back on origBranch.
+	switchedBack := false
+	defer func() {
+		if !switchedBack {
+			_ = gitutil.Checkout(root, origBranch)
+		}
+	}()
+
+	// Build the current state of the confluence branch by reading front-matter
+	// out of every managed file in localRoot.
+	currentFiles, err := scanManagedFiles(root, cfg.LocalRoot)
+	if err != nil {
+		return fmt.Errorf("scan managed files: %w", err)
+	}
+	currentByID := make(map[string]localManagedFile, len(currentFiles))
+	for _, f := range currentFiles {
+		currentByID[f.PageID] = f
 	}
 
-	// Apply all changes on the sync branch.
-	var staged []string
+	// Plan the work.
+	plan := planPull(ct, pm, currentByID)
 
-	// Process deletions first.
-	for _, c := range actionable {
-		if c.Type != tree.Deleted {
-			continue
-		}
-		fmt.Fprintf(out, "[confluencer] delete: %s\n", c.OldPath)
-		absPath := filepath.Join(root, filepath.FromSlash(c.OldPath))
-		if _, err := os.Stat(absPath); err == nil {
-			if err := gitutil.Remove(root, c.OldPath); err != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: git rm %s: %v\n", c.OldPath, err)
-			}
-		}
-		attDir := tree.AttachmentDir(c.OldPath, cfg.LocalRoot, cfg.AttachmentsDir)
-		attAbs := filepath.Join(root, filepath.FromSlash(attDir))
-		if info, err := os.Stat(attAbs); err == nil && info.IsDir() {
-			gitutil.Remove(root, attDir)
-		}
-		idx.Remove(c.PageID)
+	// Confirm deletes via direct GET (a page missing from a tree fetch could
+	// be a transient API issue, an out-of-scope move, or a real delete).
+	plan.Deletes, plan.Orphaned, plan.Unknown = classifyMissing(client, plan.Deletes)
+
+	for _, o := range plan.Orphaned {
+		fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) moved outside sync scope — leaving local file in place\n", o.PageID, o.Path)
+	}
+	for _, u := range plan.Unknown {
+		fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) status indeterminate — skipping this run\n", u.PageID, u.Path)
 	}
 
-	// Plan and execute renames/moves/promotions/demotions.
-	ops := tree.PlanMoves(actionable, cfg.LocalRoot)
-	for _, op := range ops {
-		fmt.Fprintf(out, "[confluencer] move: %s → %s\n", op.From, op.To)
-		if err := gitutil.Move(root, op.From, op.To); err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: git mv %s %s: %v\n", op.From, op.To, err)
-			continue
-		}
-		if op.Phase == tree.PhasePlace || op.Phase == tree.PhaseDirect {
-			moveAttachments(root, cfg, op, actionable)
-		}
+	if plan.IsNoOp() {
+		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
+		switchedBack = true
+		return gitutil.Checkout(root, origBranch)
 	}
 
-	// Update index entries for renames/moves.
-	for _, c := range actionable {
-		switch c.Type {
-		case tree.RenamedInPlace, tree.Moved, tree.Promoted, tree.Demoted, tree.AncestorRenamed:
-			if c.NewPath != "" {
-				idx.UpdatePath(c.PageID, c.NewPath)
-			}
-			if c.Title != "" {
-				idx.UpdateTitle(c.PageID, c.Title)
-			}
-			if c.NewParentPageID != "" {
-				idx.UpdateParent(c.PageID, c.NewParentPageID)
-			}
-		}
+	// Execute the plan on the confluence branch.
+	if err := executePullPlan(client, root, cfg, ct, pm, plan, out); err != nil {
+		return err
 	}
 
-	// Process creates and content changes.
-	for _, c := range actionable {
-		switch c.Type {
-		case tree.Created:
-			page, err := client.GetPage(c.PageID)
-			if err != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s: %v\n", c.PageID, err)
-				continue
-			}
-			attRes := &stubAttachmentResolver{
-				localPath: c.NewPath, attachmentsDir: cfg.AttachmentsDir, localRoot: cfg.LocalRoot,
-			}
-			md, err := lexer.CfToMd(page.Body, lexer.CfToMdOpts{
-				Pages: pageRes, Attachments: attRes,
-			})
-			if err != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: convert page %s: %v\n", c.PageID, err)
-				md = ""
-			}
-			if err := writeLocalFile(root, c.NewPath, md); err != nil {
-				fmt.Fprintf(out, "[confluencer] ERROR: write %s: %v\n", c.NewPath, err)
-				continue
-			}
-			node := ct.Page(c.PageID)
-			ver := 0
-			if node != nil {
-				ver = page.Version
-			}
-			idx.Add(index.Entry{
-				PageID:       c.PageID,
-				Title:        c.Title,
-				LocalPath:    c.NewPath,
-				ParentPageID: c.NewParentPageID,
-				Version:      ver,
-			})
-			staged = append(staged, c.NewPath)
-			fmt.Fprintf(out, "[confluencer] create: %s\n", c.NewPath)
-
-			downloadPageAttachments(client, root, cfg, c.PageID, c.NewPath, out)
-
-		case tree.ContentChanged:
-			page, err := client.GetPage(c.PageID)
-			if err != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s: %v\n", c.PageID, err)
-				continue
-			}
-			localPath := c.NewPath
-			if localPath == "" {
-				localPath = c.OldPath
-			}
-			attRes := &stubAttachmentResolver{
-				localPath: localPath, attachmentsDir: cfg.AttachmentsDir, localRoot: cfg.LocalRoot,
-			}
-			md, err := lexer.CfToMd(page.Body, lexer.CfToMdOpts{
-				Pages: pageRes, Attachments: attRes,
-			})
-			if err != nil {
-				fmt.Fprintf(out, "[confluencer] WARNING: convert page %s: %v\n", c.PageID, err)
-				continue
-			}
-
-			if err := writeLocalFile(root, localPath, md); err != nil {
-				fmt.Fprintf(out, "[confluencer] ERROR: write %s: %v\n", localPath, err)
-				continue
-			}
-			staged = append(staged, localPath)
-			fmt.Fprintf(out, "[confluencer] update: %s\n", localPath)
-
-			if c.Title != "" {
-				idx.UpdateTitle(c.PageID, c.Title)
-			}
-			idx.UpdateVersion(c.PageID, page.Version)
-		}
+	// Commit on the confluence branch. If nothing actually changed (e.g.
+	// every page on Confluence is already byte-identical to its local form),
+	// CommitAllOnHead returns "" and we skip the merge.
+	commitMsg := gitutil.SyncPrefix + " @ " + time.Now().UTC().Format(time.RFC3339)
+	sha, err := gitutil.CommitAllOnHead(root, commitMsg)
+	if err != nil {
+		return fmt.Errorf("commit on %s: %w", confluenceBranch, err)
 	}
 
-	// Update versions for all pages in the tree.
+	// Switch back to the working branch.
+	if err := gitutil.Checkout(root, origBranch); err != nil {
+		return fmt.Errorf("checkout %s: %w", origBranch, err)
+	}
+	switchedBack = true
+
+	if sha == "" {
+		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
+		return nil
+	}
+
+	// Merge the confluence branch into the working branch. Conflicts are
+	// the user's to resolve; we just surface them clearly.
+	conflict, err := gitutil.MergeFrom(root, confluenceBranch)
+	if err != nil {
+		return fmt.Errorf("merge %s into %s: %w", confluenceBranch, origBranch, err)
+	}
+	if conflict {
+		fmt.Fprintf(out, "[confluencer] CONFLICT: merge from %s has conflicts.\n", confluenceBranch)
+		fmt.Fprintf(out, "[confluencer]   Resolve with your editor and `git merge --continue`,\n")
+		fmt.Fprintf(out, "[confluencer]   or abort with `git merge --abort`.\n")
+		return nil
+	}
+
+	fmt.Fprintf(out, "[confluencer] done — synced %d page(s) from Confluence\n", plan.ActionCount())
+	return nil
+}
+
+// pullPlan is the structured description of what pull intends to do, computed
+// before any side effects so we can short-circuit on no-op runs and report
+// summaries cleanly.
+type pullPlan struct {
+	// Renames are pages that exist on both sides but at different paths.
+	// The page's content might also need updating; PendingWrites will pick
+	// that up by version comparison.
+	Renames []renameOp
+
+	// Deletes are pages on the confluence branch whose IDs are absent from
+	// the freshly-fetched tree. Until classifyMissing runs, this list is
+	// "candidates"; afterwards it's confirmed-deleted-on-Confluence.
+	Deletes []localManagedFile
+
+	// Orphaned are pages that exist on Confluence but moved outside our
+	// sync scope; we leave the local file alone.
+	Orphaned []localManagedFile
+
+	// Unknown are pages whose status couldn't be confirmed (network/5xx).
+	Unknown []localManagedFile
+
+	// PendingWrites are pages we need to fetch the body for and write —
+	// covers both creates (no local copy yet) and updates (version differs).
+	PendingWrites []pendingWrite
+}
+
+type renameOp struct {
+	PageID string
+	From   string
+	To     string
+}
+
+type pendingWrite struct {
+	PageID     string
+	TargetPath string
+	Node       *tree.CfNode
+}
+
+func (p pullPlan) IsNoOp() bool {
+	return len(p.Renames) == 0 && len(p.Deletes) == 0 && len(p.PendingWrites) == 0
+}
+
+func (p pullPlan) ActionCount() int {
+	return len(p.Renames) + len(p.Deletes) + len(p.PendingWrites)
+}
+
+// planPull diffs the freshly-fetched Confluence tree against the
+// confluence-branch local state and produces an action plan.
+func planPull(ct *tree.CfTree, pm *tree.PathMap, currentByID map[string]localManagedFile) pullPlan {
+	var plan pullPlan
+
+	// Pages present on Confluence: classify into rename/update/create.
 	ct.Walk(func(node *tree.CfNode) {
-		idx.UpdateVersion(node.PageID, node.Version)
+		targetPath, ok := pm.Path(node.PageID)
+		if !ok {
+			return
+		}
+		cur, found := currentByID[node.PageID]
+		if !found {
+			plan.PendingWrites = append(plan.PendingWrites, pendingWrite{
+				PageID: node.PageID, TargetPath: targetPath, Node: node,
+			})
+			return
+		}
+		if cur.Path != targetPath {
+			plan.Renames = append(plan.Renames, renameOp{
+				PageID: node.PageID, From: cur.Path, To: targetPath,
+			})
+		}
+		if cur.Version != node.Version {
+			plan.PendingWrites = append(plan.PendingWrites, pendingWrite{
+				PageID: node.PageID, TargetPath: targetPath, Node: node,
+			})
+		}
 	})
 
-	// Save updated index.
-	if err := idx.Save(filepath.Join(root, indexFile)); err != nil {
-		cleanup()
-		return fmt.Errorf("save index: %w", err)
-	}
-
-	// Stage everything and commit on the sync branch.
-	allStaged := append(staged, indexFile)
-	if err := gitutil.Add(root, allStaged...); err != nil {
-		cleanup()
-		return fmt.Errorf("git add: %w", err)
-	}
-	if err := gitutil.Commit(root, gitutil.SyncPrefix); err != nil {
-		if strings.Contains(err.Error(), "nothing to commit") {
-			cleanup()
-			fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
-			return nil
-		}
-		cleanup()
-		return fmt.Errorf("sync commit: %w", err)
-	}
-
-	// Switch back to the original branch and rebase onto the sync branch.
-	if err := gitutil.Checkout(root, origBranch); err != nil {
-		cleanup()
-		return fmt.Errorf("checkout original branch: %w", err)
-	}
-
-	if err := gitutil.Rebase(root, syncBranch); err != nil {
-		// Rebase failed — likely a conflict. Abort the rebase and fall back
-		// to a direct merge so the developer can resolve conflicts manually.
-		fmt.Fprintf(out, "[confluencer] WARNING: rebase failed, attempting merge...\n")
-		gitutil.RebaseAbort(root)
-
-		// Fall back: cherry-pick the sync commit's changes directly.
-		// The sync branch has exactly one commit on top of baseSHA.
-		// Merge it instead.
-		mergeErr := gitMerge(root, syncBranch)
-		if mergeErr != nil {
-			fmt.Fprintf(out, "[confluencer] CONFLICT: merge has conflicts. Resolve with 'git merge --continue' after fixing.\n")
-			gitutil.DeleteBranch(root, syncBranch)
-			return nil
+	// Pages on the confluence branch but not in the tree → delete candidates.
+	for _, cur := range currentFilesSorted(currentByID) {
+		if !ct.Contains(cur.PageID) {
+			plan.Deletes = append(plan.Deletes, cur)
 		}
 	}
+	return plan
+}
 
-	// Clean up the sync branch.
-	gitutil.DeleteBranch(root, syncBranch)
+// currentFilesSorted returns the values of currentByID sorted by path so that
+// plan output (and any commit-message ordering) is deterministic.
+func currentFilesSorted(currentByID map[string]localManagedFile) []localManagedFile {
+	out := make([]localManagedFile, 0, len(currentByID))
+	for _, f := range currentByID {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
 
-	fmt.Fprintf(out, "[confluencer] done — %d change(s) synced from Confluence\n", len(actionable))
+// classifyMissing partitions delete-candidates into truly-deleted (404),
+// orphaned (still exists but moved out of sync scope), and unknown (network /
+// 5xx — we can't tell, so we leave them alone this run).
+func classifyMissing(client *api.Client, candidates []localManagedFile) (deleted, orphaned, unknown []localManagedFile) {
+	for _, c := range candidates {
+		_, err := client.GetPage(c.PageID)
+		switch {
+		case err == nil:
+			orphaned = append(orphaned, c)
+		case api.IsNotFound(err):
+			deleted = append(deleted, c)
+		default:
+			unknown = append(unknown, c)
+		}
+	}
+	return
+}
+
+// executePullPlan applies the plan to the working tree (already on the
+// confluence branch). Renames are applied first using a two-phase staging
+// protocol whenever any rename's destination is another rename's source;
+// then deletes; then writes.
+func executePullPlan(client *api.Client, root string, cfg *cfgpkg.Config, ct *tree.CfTree, pm *tree.PathMap, plan pullPlan, out io.Writer) error {
+	// Two-phase rename: if any rename's destination is another rename's
+	// source, route everyone through a staging dir to avoid intermediate
+	// path collisions. Otherwise direct git mv is fine.
+	if len(plan.Renames) > 0 {
+		if err := applyRenames(root, cfg, plan.Renames, out); err != nil {
+			return err
+		}
+	}
+
+	// Deletes (file + per-page attachments dir).
+	for _, d := range plan.Deletes {
+		fmt.Fprintf(out, "[confluencer] delete: %s\n", d.Path)
+		if err := gitutil.Remove(root, d.Path); err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: git rm %s: %v\n", d.Path, err)
+		}
+		attDir := tree.AttachmentDir(d.Path, cfg.LocalRoot, cfg.AttachmentsDir)
+		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(attDir))); err == nil && info.IsDir() {
+			_ = gitutil.Remove(root, attDir)
+		}
+	}
+
+	// Pending writes (creates and updates). Process in path order so commit
+	// output is deterministic and parents land before children for any
+	// downstream tooling that reads in walk order.
+	sort.Slice(plan.PendingWrites, func(i, j int) bool {
+		return plan.PendingWrites[i].TargetPath < plan.PendingWrites[j].TargetPath
+	})
+	for _, pw := range plan.PendingWrites {
+		page, err := client.GetPage(pw.PageID)
+		if err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s: %v\n", pw.PageID, err)
+			continue
+		}
+		opts := resolverForPage(pw.TargetPath, cfg, ct, pm)
+		content, err := renderPage(pw.PageID, page.Body, page.Version, opts)
+		if err != nil {
+			fmt.Fprintf(out, "[confluencer] WARNING: %v\n", err)
+			continue
+		}
+		if err := writeLocalFile(root, pw.TargetPath, content); err != nil {
+			fmt.Fprintf(out, "[confluencer] ERROR: write %s: %v\n", pw.TargetPath, err)
+			continue
+		}
+		// Verb depends on whether this was a create or an update.
+		verb := "update"
+		if _, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(pw.TargetPath))); statErr == nil && pw.Node != nil {
+			// Both create and update succeed past the write; we infer create
+			// when the page wasn't tracked under the same path before. We've
+			// already lost that information here, so just print "write" for
+			// either case to keep output unambiguous.
+			verb = "write"
+		}
+		fmt.Fprintf(out, "[confluencer] %s: %s\n", verb, pw.TargetPath)
+
+		downloadPageAttachments(client, root, cfg, pw.PageID, pw.TargetPath, out)
+	}
 	return nil
 }
 
-// gitMerge performs a git merge of the given branch into the current branch.
-func gitMerge(repoDir, branch string) error {
-	cmd := gitCommand(repoDir, "merge", branch, "-m", gitutil.SyncPrefix)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git merge %s: %s: %w", branch, out, err)
+// applyRenames executes all rename operations using a two-phase staging
+// strategy when needed, plus moving each page's per-page attachment
+// subdirectory alongside its .md file.
+func applyRenames(root string, cfg *cfgpkg.Config, renames []renameOp, out io.Writer) error {
+	if hasCollisions(renames) {
+		stagingDir := filepath.Join(cfg.LocalRoot, ".confluencer-staging")
+		stagingAbs := filepath.Join(root, filepath.FromSlash(stagingDir))
+		_ = os.MkdirAll(stagingAbs, 0o755)
+		// Phase 1: move all sources into staging under stable names.
+		stageMap := make(map[string]string, len(renames))
+		for i, r := range renames {
+			stagedPath := filepath.ToSlash(filepath.Join(stagingDir, fmt.Sprintf("%d.md", i)))
+			if err := gitutil.Move(root, r.From, stagedPath); err != nil {
+				return fmt.Errorf("stage rename %s: %w", r.From, err)
+			}
+			stageMap[r.PageID] = stagedPath
+		}
+		// Phase 2: move from staging to final destinations.
+		for _, r := range renames {
+			fmt.Fprintf(out, "[confluencer] rename: %s → %s\n", r.From, r.To)
+			if err := gitutil.Move(root, stageMap[r.PageID], r.To); err != nil {
+				return fmt.Errorf("place rename %s → %s: %w", r.From, r.To, err)
+			}
+			renamePageAttachments(root, cfg, r, out)
+		}
+		_ = os.RemoveAll(stagingAbs)
+		return nil
+	}
+	for _, r := range renames {
+		fmt.Fprintf(out, "[confluencer] rename: %s → %s\n", r.From, r.To)
+		if err := gitutil.Move(root, r.From, r.To); err != nil {
+			return fmt.Errorf("rename %s → %s: %w", r.From, r.To, err)
+		}
+		renamePageAttachments(root, cfg, r, out)
 	}
 	return nil
 }
 
-// gitCommand creates an exec.Cmd for a git operation.
-func gitCommand(repoDir string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoDir
-	return cmd
+// hasCollisions returns true if any rename's target path equals another
+// rename's source path — which would make a direct `git mv` of the second
+// rename fail because the source has already been overwritten.
+func hasCollisions(renames []renameOp) bool {
+	sources := make(map[string]struct{}, len(renames))
+	for _, r := range renames {
+		sources[r.From] = struct{}{}
+	}
+	for _, r := range renames {
+		if _, ok := sources[r.To]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// renamePageAttachments moves a page's per-page attachment subdirectory to
+// match its new path. Best effort — failures are logged but don't abort the
+// rename of the .md file itself.
+func renamePageAttachments(root string, cfg *cfgpkg.Config, r renameOp, out io.Writer) {
+	oldDir := tree.AttachmentDir(r.From, cfg.LocalRoot, cfg.AttachmentsDir)
+	newDir := tree.AttachmentDir(r.To, cfg.LocalRoot, cfg.AttachmentsDir)
+	if oldDir == newDir {
+		return
+	}
+	if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(oldDir))); err != nil || !info.IsDir() {
+		return
+	}
+	if err := gitutil.Move(root, oldDir, newDir); err != nil {
+		fmt.Fprintf(out, "[confluencer] WARNING: move attachments %s → %s: %v\n", oldDir, newDir, err)
+	}
 }
 
 // writeLocalFile writes content to a repo-relative path, creating directories.
@@ -499,27 +447,8 @@ func writeLocalFile(root, repoPath, content string) error {
 	return os.WriteFile(absPath, []byte(content), 0o644)
 }
 
-// moveAttachments moves the attachment directory when a page is renamed.
-func moveAttachments(root string, cfg *cfgpkg.Config, op tree.MoveOp, changes []tree.Change) {
-	for _, c := range changes {
-		if c.PageID != op.PageID {
-			continue
-		}
-		oldAttDir := tree.AttachmentDir(c.OldPath, cfg.LocalRoot, cfg.AttachmentsDir)
-		newAttDir := tree.AttachmentDir(c.NewPath, cfg.LocalRoot, cfg.AttachmentsDir)
-		if oldAttDir == newAttDir {
-			return
-		}
-		absOld := filepath.Join(root, filepath.FromSlash(oldAttDir))
-		if _, err := os.Stat(absOld); err != nil {
-			return
-		}
-		gitutil.Move(root, oldAttDir, newAttDir)
-		return
-	}
-}
-
-// downloadPageAttachments downloads all attachments for a page.
+// downloadPageAttachments downloads all attachments for a page into the
+// per-page attachment subdirectory.
 func downloadPageAttachments(client *api.Client, root string, cfg *cfgpkg.Config, pageID, localPath string, out io.Writer) {
 	atts, err := client.GetAttachments(pageID, "")
 	if err != nil {
@@ -534,49 +463,23 @@ func downloadPageAttachments(client *api.Client, root string, cfg *cfgpkg.Config
 			continue
 		}
 		attPath := filepath.Join(root, filepath.FromSlash(attDir), att.Filename)
-		os.MkdirAll(filepath.Dir(attPath), 0o755)
-		os.WriteFile(attPath, data, 0o644)
+		_ = os.MkdirAll(filepath.Dir(attPath), 0o755)
+		_ = os.WriteFile(attPath, data, 0o644)
 	}
 }
 
-// acquireLock creates a lock file exclusively. Returns an error if the lock is held.
+// File-lock helpers — unchanged from the previous implementation. The lock
+// lives under .git/ so it never appears in `git status` output.
+
 func acquireLock(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 }
 
-// releaseLock closes and removes the lock file.
 func releaseLock(f *os.File, path string) {
-	f.Close()
-	os.Remove(path)
+	_ = f.Close()
+	_ = os.Remove(path)
 }
 
-// removeStaleLock removes a lock file left behind by a crashed process.
 func removeStaleLock(path string) {
-	os.Remove(path)
-}
-
-// pullPageResolver resolves cross-page links during pull.
-type pullPageResolver struct {
-	tree  *tree.CfTree
-	paths *tree.PathMap
-}
-
-func newPullPageResolver(ct *tree.CfTree, pm *tree.PathMap) *pullPageResolver {
-	return &pullPageResolver{tree: ct, paths: pm}
-}
-
-func (r *pullPageResolver) ResolvePageByTitle(title, spaceKey string) (localPath string, ok bool) {
-	var found *tree.CfNode
-	r.tree.Walk(func(n *tree.CfNode) {
-		if found != nil {
-			return
-		}
-		if n.Title == title {
-			found = n
-		}
-	})
-	if found == nil {
-		return "", false
-	}
-	return r.paths.Path(found.PageID)
+	_ = os.Remove(path)
 }
