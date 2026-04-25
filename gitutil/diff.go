@@ -1,8 +1,6 @@
 package gitutil
 
 import (
-	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -16,63 +14,22 @@ const (
 	ActionRenamed  FileAction = "R"
 )
 
-// FileDiff represents a single file change in a commit or range.
+// FileDiff represents a single file change in a commit or diff range.
 type FileDiff struct {
 	Action  FileAction
 	Path    string // current path (new path for renames)
 	OldPath string // previous path (renames only)
 }
 
-// DiffRange returns file changes between two commits with rename detection.
-// If baseSHA is empty or the zero SHA, diffs against an empty tree.
-func DiffRange(repoDir, baseSHA, headSHA string) ([]FileDiff, error) {
-	base := baseSHA
-	if base == "" || base == zeroSHA {
-		var err error
-		base, err = ensureEmptyTree(repoDir)
-		if err != nil {
-			return nil, fmt.Errorf("create empty tree for diff: %w", err)
-		}
-	}
-	cmd := exec.Command("git", "diff", "--name-status", "-M", base, headSHA)
-	cmd.Dir = repoDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("git diff %s %s: %s: %w", base, headSHA, strings.TrimSpace(string(out)), err)
-	}
-	return parseDiffOutput(string(out))
-}
-
-// ensureEmptyTree writes an empty tree object into the repo's object store
-// and returns its hash. This avoids relying on the well-known empty tree SHA
-// existing in the repo, which is not guaranteed across all Git configurations.
-func ensureEmptyTree(repoDir string) (string, error) {
-	cmd := exec.Command("git", "hash-object", "-t", "tree", "-w", "--stdin")
-	cmd.Dir = repoDir
-	cmd.Stdin = strings.NewReader("")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("git hash-object -t tree -w: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// DiffCommit returns file changes for a single commit with rename detection.
-// For the root commit (no parent), uses --root to diff against the empty tree.
-func DiffCommit(repoDir, commitSHA string) ([]FileDiff, error) {
-	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "-r",
-		"--name-status", "-M", "--root", commitSHA)
-	cmd.Dir = repoDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("git diff-tree %s: %s: %w", commitSHA, strings.TrimSpace(string(out)), err)
-	}
-	return parseDiffOutput(string(out))
-}
-
-// parseDiffOutput parses git diff --name-status output.
-// Format: ACTION\tPATH or ACTION\tOLD_PATH\tNEW_PATH (for renames).
-// The action for renames includes a similarity percentage (e.g. "R100").
+// parseDiffOutput parses the output of `git diff --name-status` (with -M for
+// rename detection). The format is one of:
+//
+//	A\t<path>
+//	M\t<path>
+//	D\t<path>
+//	R<percent>\t<old-path>\t<new-path>
+//
+// Lines that don't match a known action are skipped silently.
 func parseDiffOutput(output string) ([]FileDiff, error) {
 	var diffs []FileDiff
 	for _, line := range strings.Split(output, "\n") {
@@ -105,18 +62,4 @@ func parseDiffOutput(output string) ([]FileDiff, error) {
 		}
 	}
 	return diffs, nil
-}
-
-// FilterMd returns only diffs where the relevant path ends in ".md".
-// For renames, either old or new path ending in .md qualifies.
-func FilterMd(diffs []FileDiff) []FileDiff {
-	var out []FileDiff
-	for _, d := range diffs {
-		if strings.HasSuffix(d.Path, ".md") {
-			out = append(out, d)
-		} else if d.Action == ActionRenamed && strings.HasSuffix(d.OldPath, ".md") {
-			out = append(out, d)
-		}
-	}
-	return out
 }

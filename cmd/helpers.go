@@ -15,11 +15,5 @@ func repoRoot() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// configPath returns the path to .confluencer.json relative to the repo root.
+// configFile is the name of the tracked confluencer configuration file.
 const configFile = ".confluencer.json"
-
-// indexFile is the name of the page-to-path index file.
-const indexFile = ".confluencer-index.json"
-
-// pendingFile is the name of the pending queue file.
-const pendingFile = ".confluencer-pending"

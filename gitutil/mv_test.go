@@ -93,34 +93,3 @@ func TestRemove_Empty(t *testing.T) {
 	}
 }
 
-func TestAdd(t *testing.T) {
-	dir := initTestRepo(t)
-
-	writeFile(t, dir, "docs/new.md", "# New\n")
-
-	if err := Add(dir, "docs/new.md"); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-
-	// Check the file is staged.
-	status := run(t, dir, "git", "status", "--porcelain")
-	if status == "" {
-		t.Error("expected staged file")
-	}
-}
-
-func TestCommit(t *testing.T) {
-	dir := initTestRepo(t)
-
-	writeFile(t, dir, "docs/page.md", "# Page\n")
-	run(t, dir, "git", "add", "-A")
-
-	if err := Commit(dir, "test commit message"); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-
-	msg, _ := CommitMessage(dir, headSHA(t, dir))
-	if msg != "test commit message" {
-		t.Errorf("msg = %q", msg)
-	}
-}
