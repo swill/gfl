@@ -1,6 +1,8 @@
 # gfl
 
-Deterministic, bidirectional synchronisation between Markdown files in a Git repository and pages in an Atlassian Confluence instance.
+Project Naming: "Git + Confluence" -> "gitfluence" -> `gfl`
+
+Deterministic, bidirectional synchronization between Markdown files in a Git repository and pages in an Atlassian Confluence instance.
 
 `gfl` operates entirely through Git hooks and the Confluence REST API. It mirrors a Confluence space's hierarchy as a directory tree of Markdown files, and uses Git's native branch and merge machinery to reconcile changes from both sides.
 
@@ -174,8 +176,8 @@ The pull hooks are guarded by `GFL_HOOK_ACTIVE` so the commit that pull itself c
 
 ### Daily commands
 
-| Command               | What it does                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Command       | What it does                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gfl status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt.                                                 |
 | `gfl pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts.                       |
 | `gfl push`    | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to match. |
