@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/swill/confluencer/tree"
+	"github.com/swill/gfl/tree"
 )
 
 // makeTree builds a small CfTree with the given (id, parent, title) triples.

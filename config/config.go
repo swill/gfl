@@ -1,4 +1,4 @@
-// Package config reads and writes .confluencer.json (the project
+// Package config reads and writes .gfl.json (the project
 // configuration that anchors a sync scope) and loads Confluence
 // credentials from environment variables.
 package config
@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-// Config represents the .confluencer.json project configuration.
+// Config represents the .gfl.json project configuration.
 type Config struct {
 	RootPageID     string `json:"confluence_root_page_id"`
 	SpaceKey       string `json:"confluence_space_key"`
@@ -18,7 +18,7 @@ type Config struct {
 	AttachmentsDir string `json:"attachments_dir"`
 }
 
-// LoadConfig reads and validates a .confluencer.json file.
+// LoadConfig reads and validates a .gfl.json file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

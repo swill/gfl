@@ -13,7 +13,7 @@ import (
 //
 // The on-disk shape, exactly:
 //
-//	<!-- confluencer:storage:block:v1:b64
+//	<!-- gfl:storage:block:v1:b64
 //	<base64 wrapped at 76 cols>
 //	-->
 //
@@ -22,7 +22,7 @@ import (
 // needed in Normalise. md_to_cf hands every HTMLBlock to DecodeBlockFence; on
 // a match, the decoded XML is spliced back into the storage output unchanged.
 const (
-	fenceOpenLine = "<!-- confluencer:storage:block:v1:b64"
+	fenceOpenLine = "<!-- gfl:storage:block:v1:b64"
 	fenceCloseTag = "-->"
 	// Base64 line width inside the fence. 76 matches the historical MIME/PEM
 	// convention; the exact value is not load-bearing as long as Encode and

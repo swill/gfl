@@ -1,4 +1,4 @@
-# confluencer — Makefile
+# gfl — Makefile
 #
 # Version resolution order:
 #   1. $VERSION env var
@@ -13,8 +13,8 @@
 
 SHELL := /bin/sh
 
-BINARY      := confluencer
-PKG         := github.com/swill/confluencer
+BINARY      := gfl
+PKG         := github.com/swill/gfl
 CMD_PATH    := .
 DIST_DIR    := dist
 BIN_DIR     := bin
@@ -106,7 +106,7 @@ clean:
 
 .PHONY: help
 help:
-	@echo "confluencer — make targets"
+	@echo "gfl — make targets"
 	@echo "  build          compile local binary into ./bin/$(BINARY)"
 	@echo "  test           run unit tests (-race)"
 	@echo "  test-cover     run tests and print total coverage"

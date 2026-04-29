@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/swill/confluencer/api"
-	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/tree"
+	"github.com/swill/gfl/api"
+	cfgpkg "github.com/swill/gfl/config"
+	"github.com/swill/gfl/tree"
 )
 
 var (
@@ -22,7 +22,7 @@ var initCmd = &cobra.Command{
 	Short: "Populate a local repo from an existing Confluence page tree",
 	Long: `Fetches a Confluence page tree rooted at --page-id and writes it to
 --local-root as a tree of Markdown files. Each file gets a confluence_page_id
-and confluence_version front-matter block. Also writes .confluencer.json
+and confluence_version front-matter block. Also writes .gfl.json
 (including the cached space key) and the hook shims, then installs them.
 
 After init, review the files and create your initial commit. The first
@@ -46,7 +46,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	cfgPath := filepath.Join(root, configFile)
 	if _, err := os.Stat(cfgPath); err == nil {
-		return fmt.Errorf("%s already exists — confluencer is already initialised in this repository", configFile)
+		return fmt.Errorf("%s already exists — gfl is already initialised in this repository", configFile)
 	}
 
 	localRoot := initLocalRoot
@@ -155,37 +155,37 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("install hooks: %w", err)
 	}
 
-	fmt.Fprintf(out, "\nInitialised confluencer:\n")
+	fmt.Fprintf(out, "\nInitialised gfl:\n")
 	fmt.Fprintf(out, "  Pages:       %d\n", fileCount)
 	fmt.Fprintf(out, "  Attachments: %d\n", attCount)
 	fmt.Fprintf(out, "  Config:      %s\n", configFile)
-	fmt.Fprintf(out, "  Hooks:       .confluencer/hooks/ → .git/hooks/\n")
+	fmt.Fprintf(out, "  Hooks:       .gfl/hooks/ → .git/hooks/\n")
 	fmt.Fprintln(out, "\nReview the files, then `git add` and commit.")
 
 	return nil
 }
 
-// writeHookShims creates .confluencer/hooks/ and writes the Git hook shims.
+// writeHookShims creates .gfl/hooks/ and writes the Git hook shims.
 // pre-push runs push (which is read-only on the local working tree); the
-// post-* hooks run pull, guarded against re-entry by CONFLUENCER_HOOK_ACTIVE
+// post-* hooks run pull, guarded against re-entry by GFL_HOOK_ACTIVE
 // since pull creates its own commits on the confluence branch.
 func writeHookShims(root string) error {
-	hooksDir := filepath.Join(root, ".confluencer", "hooks")
+	hooksDir := filepath.Join(root, ".gfl", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return err
 	}
 
 	guard := `
-if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+if [ -n "$GFL_HOOK_ACTIVE" ]; then
   exit 0
 fi
-export CONFLUENCER_HOOK_ACTIVE=1
+export GFL_HOOK_ACTIVE=1
 `
 	shims := map[string]string{
-		"pre-push":     "#!/bin/sh\nset -e\nconfluencer push\n",
-		"post-commit":  "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
-		"post-merge":   "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
-		"post-rewrite": "#!/bin/sh\nset -e\n" + guard + "confluencer pull\n",
+		"pre-push":     "#!/bin/sh\nset -e\ngfl push\n",
+		"post-commit":  "#!/bin/sh\nset -e\n" + guard + "gfl pull\n",
+		"post-merge":   "#!/bin/sh\nset -e\n" + guard + "gfl pull\n",
+		"post-rewrite": "#!/bin/sh\nset -e\n" + guard + "gfl pull\n",
 	}
 	for name, content := range shims {
 		path := filepath.Join(hooksDir, name)
@@ -196,7 +196,7 @@ export CONFLUENCER_HOOK_ACTIVE=1
 	return nil
 }
 
-// writeGitignoreStub appends confluencer entries to .gitignore if missing.
+// writeGitignoreStub appends gfl entries to .gitignore if missing.
 // Best effort — does not fail the init on errors.
 func writeGitignoreStub(root string) {
 	gitignorePath := filepath.Join(root, ".gitignore")
@@ -222,7 +222,7 @@ func writeGitignoreStub(root string) {
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		f.WriteString("\n")
 	}
-	f.WriteString("# confluencer\n")
+	f.WriteString("# gfl\n")
 	for _, e := range toAdd {
 		f.WriteString(e + "\n")
 	}

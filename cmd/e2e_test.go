@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/gitutil"
+	cfgpkg "github.com/swill/gfl/config"
+	"github.com/swill/gfl/gitutil"
 )
 
 // e2eRepo bundles up an initialised test repository with a mock Confluence
@@ -23,7 +23,7 @@ type e2eRepo struct {
 }
 
 // newE2ERepo seeds a temp git repo and a mock Confluence instance, writes
-// the .confluencer.json that points at the mock, and points credential env
+// the .gfl.json that points at the mock, and points credential env
 // vars at the same place. The repo is left clean and committed.
 func newE2ERepo(t *testing.T, tree [][4]string) *e2eRepo {
 	t.Helper()

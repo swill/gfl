@@ -4,14 +4,14 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/swill/confluencer/gitutil"
+	"github.com/swill/gfl/gitutil"
 )
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show outstanding changes that would be pushed to Confluence",
 	Long: `Lists every .md file that differs between the current branch and the local
-'confluence' branch — i.e., everything 'confluencer push' would attempt to
+'confluence' branch — i.e., everything 'gfl push' would attempt to
 write to Confluence on its next run.`,
 	RunE: runStatus,
 }
@@ -32,7 +32,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if !exists {
-		fmt.Fprintf(out, "No %q branch yet — run `confluencer pull` first to seed it.\n", confluenceBranch)
+		fmt.Fprintf(out, "No %q branch yet — run `gfl pull` first to seed it.\n", confluenceBranch)
 		return nil
 	}
 

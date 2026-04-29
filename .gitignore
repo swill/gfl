@@ -1,8 +1,8 @@
 # Build artefacts
 /bin/
 /dist/
-confluencer
-confluencer-*
+gfl
+gfl-*
 *.exe
 
 # Go workspace

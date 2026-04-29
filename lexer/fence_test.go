@@ -14,7 +14,7 @@ func TestEncodeBlockFence_Shape(t *testing.T) {
 	if len(lines) < 3 {
 		t.Fatalf("fence should have at least 3 lines, got %d:\n%s", len(lines), got)
 	}
-	if lines[0] != "<!-- confluencer:storage:block:v1:b64" {
+	if lines[0] != "<!-- gfl:storage:block:v1:b64" {
 		t.Errorf("first line = %q", lines[0])
 	}
 	if lines[len(lines)-1] != "-->" {
@@ -84,14 +84,14 @@ func TestDecodeBlockFence_RejectsNonFences(t *testing.T) {
 	}{
 		{"plain html comment", "<!-- just a regular comment -->"},
 		{"html block, not a fence", "<div>hi</div>"},
-		{"wrong version", "<!-- confluencer:storage:block:v0:b64\nYWJj\n-->"},
-		{"wrong encoding tag", "<!-- confluencer:storage:block:v1:hex\nYWJj\n-->"},
-		{"missing close", "<!-- confluencer:storage:block:v1:b64\nYWJj"},
+		{"wrong version", "<!-- gfl:storage:block:v0:b64\nYWJj\n-->"},
+		{"wrong encoding tag", "<!-- gfl:storage:block:v1:hex\nYWJj\n-->"},
+		{"missing close", "<!-- gfl:storage:block:v1:b64\nYWJj"},
 		{"missing open", "YWJj\n-->"},
-		{"open with trailing junk on same line", "<!-- confluencer:storage:block:v1:b64 EXTRA\nYWJj\n-->"},
-		{"corrupt base64", "<!-- confluencer:storage:block:v1:b64\n!!!notb64!!!\n-->"},
+		{"open with trailing junk on same line", "<!-- gfl:storage:block:v1:b64 EXTRA\nYWJj\n-->"},
+		{"corrupt base64", "<!-- gfl:storage:block:v1:b64\n!!!notb64!!!\n-->"},
 		{"empty", ""},
-		{"single line opener", "<!-- confluencer:storage:block:v1:b64 -->"},
+		{"single line opener", "<!-- gfl:storage:block:v1:b64 -->"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

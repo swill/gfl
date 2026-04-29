@@ -8,9 +8,9 @@ import (
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Print the confluencer version",
+	Short: "Print the gfl version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintf(cmd.OutOrStdout(), "confluencer %s (commit %s, built %s)\n", version, commit, buildDate)
+		fmt.Fprintf(cmd.OutOrStdout(), "gfl %s (commit %s, built %s)\n", version, commit, buildDate)
 	},
 }
 

@@ -1,10 +1,10 @@
-# confluencer
+# gfl
 
 Deterministic, bidirectional synchronisation between Markdown files in a Git repository and pages in an Atlassian Confluence instance.
 
-`confluencer` operates entirely through Git hooks and the Confluence REST API. It mirrors a Confluence space's hierarchy as a directory tree of Markdown files, and uses Git's native branch and merge machinery to reconcile changes from both sides.
+`gfl` operates entirely through Git hooks and the Confluence REST API. It mirrors a Confluence space's hierarchy as a directory tree of Markdown files, and uses Git's native branch and merge machinery to reconcile changes from both sides.
 
-Each managed `.md` file carries a small front-matter block recording its `confluence_page_id` and `confluence_version`. A persistent local Git branch named `confluence` always represents the last-known Confluence-side state. `confluencer pull` updates that branch from Confluence and merges it into your working branch. `confluencer push` diffs your working branch against `confluence`, sends the differences to Confluence, then commits a sync chore on your working branch and fast-forwards `confluence` to match. Conflicts are ordinary `git merge` conflicts, resolved with your normal tools.
+Each managed `.md` file carries a small front-matter block recording its `confluence_page_id` and `confluence_version`. A persistent local Git branch named `confluence` always represents the last-known Confluence-side state. `gfl pull` updates that branch from Confluence and merges it into your working branch. `gfl push` diffs your working branch against `confluence`, sends the differences to Confluence, then commits a sync chore on your working branch and fast-forwards `confluence` to match. Conflicts are ordinary `git merge` conflicts, resolved with your normal tools.
 
 Highlights:
 
@@ -19,16 +19,16 @@ Highlights:
 
 ## Installation
 
-`confluencer` is installed per-developer, not bundled with consuming repositories. Each developer puts the binary on their `PATH`.
+`gfl` is installed per-developer, not bundled with consuming repositories. Each developer puts the binary on their `PATH`.
 
 ### From release binaries
 
-Pre-compiled binaries are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Download the appropriate archive, extract, and place `confluencer` somewhere on your `PATH` (e.g. `/usr/local/bin`).
+Pre-compiled binaries are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Download the appropriate archive, extract, and place `gfl` somewhere on your `PATH` (e.g. `/usr/local/bin`).
 
 Verify the install:
 
 ```sh
-confluencer version
+gfl version
 ```
 
 ### From source
@@ -36,14 +36,14 @@ confluencer version
 Requires Go 1.22 or later.
 
 ```sh
-go install github.com/swill/confluencer@latest
+go install github.com/swill/gfl@latest
 ```
 
 This drops the binary in `$(go env GOPATH)/bin`. Make sure that directory is on your `PATH`.
 
 ## Getting started: a new repository
 
-Use `confluencer init` to initialise a Git repository from an existing Confluence page tree.
+Use `gfl init` to initialise a Git repository from an existing Confluence page tree.
 
 ```sh
 cd your-repo
@@ -56,15 +56,15 @@ CONFLUENCE_API_TOKEN=your_api_token
 EOF
 
 # Populate the repository from a Confluence page tree
-confluencer init --page-id <root-page-id> [--local-root docs/]
+gfl init --page-id <root-page-id> [--local-root docs/]
 ```
 
 `init` fetches the full page tree, converts each page to Markdown (with front-matter), downloads attachments, and writes:
 
 - `docs/` (or your chosen `--local-root`) — the Markdown file tree
-- `.confluencer.json` — configuration (root page ID, cached space key, local root, attachments dir)
+- `.gfl.json` — configuration (root page ID, cached space key, local root, attachments dir)
 - `.gitignore` entries for `.env`
-- `.confluencer/hooks/` shims, installed into `.git/hooks/`
+- `.gfl/hooks/` shims, installed into `.git/hooks/`
 
 Review the output, then `git add` and commit. Your first post-commit hook will seed the local `confluence` branch from your tree state.
 
@@ -125,7 +125,7 @@ Conventions:
 
 ### Configuration files
 
-`.confluencer.json` (tracked):
+`.gfl.json` (tracked):
 
 ```json
 {
@@ -146,9 +146,9 @@ CONFLUENCE_API_TOKEN=your_api_token
 
 Environment variables of the same names take precedence over `.env`.
 
-## Getting started: an existing confluencer repository
+## Getting started: an existing gfl repository
 
-When joining a repository someone else has already run `confluencer init` on:
+When joining a repository someone else has already run `gfl init` on:
 
 ```sh
 git clone <repo>
@@ -158,28 +158,28 @@ cd <repo>
 cp .env.example .env
 # Edit .env with your Confluence credentials
 
-# Install Git hooks (assumes `confluencer` is on your PATH)
-confluencer install
+# Install Git hooks (assumes `gfl` is on your PATH)
+gfl install
 ```
 
-`install` is idempotent; it just copies hook shims from `.confluencer/hooks/` into `.git/hooks/`.
+`install` is idempotent; it just copies hook shims from `.gfl/hooks/` into `.git/hooks/`.
 
 After this, ordinary Git operations stay in sync with Confluence:
 
-- `git commit` → post-commit hook runs `confluencer pull`
-- `git push` → pre-push hook runs `confluencer push`
+- `git commit` → post-commit hook runs `gfl pull`
+- `git push` → pre-push hook runs `gfl push`
 - `git merge` / `git rebase` → post-merge / post-rewrite hooks also run pull
 
-The pull hooks are guarded by `CONFLUENCER_HOOK_ACTIVE` so the commit that pull itself creates doesn't re-trigger pull. Push self-suppresses the same hooks while it commits its own sync chore.
+The pull hooks are guarded by `GFL_HOOK_ACTIVE` so the commit that pull itself creates doesn't re-trigger pull. Push self-suppresses the same hooks while it commits its own sync chore.
 
 ### Daily commands
 
 | Command               | What it does                                                                                                                                            |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `confluencer status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt.                                                 |
-| `confluencer pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts.                       |
-| `confluencer push`    | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to match. |
-| `confluencer version` | Print version, commit, and build date.                                                                                                                  |
+| `gfl status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt.                                                 |
+| `gfl pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts.                       |
+| `gfl push`    | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to match. |
+| `gfl version` | Print version, commit, and build date.                                                                                                                  |
 
 You usually don't run `pull` or `push` directly — Git hooks handle them. Use `status` to see what's pending; use the explicit commands when troubleshooting.
 
@@ -203,14 +203,14 @@ The local branch `confluence` is the canonical "last-known Confluence state" —
 
 Failed operations don't queue — they re-appear in the next push's diff and are retried then.
 
-## Developing confluencer
+## Developing gfl
 
-This section is for working on `confluencer` itself, not for using it.
+This section is for working on `gfl` itself, not for using it.
 
 ### Build
 
 ```sh
-go build -o confluencer .
+go build -o gfl .
 ```
 
 Or with version metadata:
@@ -236,7 +236,7 @@ lexer/       Pure text transforms: normalise, frontmatter, cf_to_md, md_to_cf, f
 api/         Confluence REST v1 client (content, attachments)
 gitutil/     Git primitives: branch, diff, merge, stash, mv/rm, content-at-ref
 tree/        CfTree/CfNode, PathMap (slug-based path computation), AttachmentDir
-config/      .confluencer.json and .env credential loading
+config/      .gfl.json and .env credential loading
 ```
 
 See `CLAUDE.md` for the design rationale, sync invariants, and the round-trip idempotency contract that the lexers must satisfy.

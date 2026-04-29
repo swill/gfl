@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/swill/confluencer/api"
-	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/gitutil"
-	"github.com/swill/confluencer/tree"
+	"github.com/swill/gfl/api"
+	cfgpkg "github.com/swill/gfl/config"
+	"github.com/swill/gfl/gitutil"
+	"github.com/swill/gfl/tree"
 )
 
 var pullCmd = &cobra.Command{
@@ -42,7 +42,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	lockPath := filepath.Join(gitDir, "confluencer-pull.lock")
+	lockPath := filepath.Join(gitDir, "gfl-pull.lock")
 	lock, err := acquireLock(lockPath)
 	if err != nil {
 		if stdinIsTerminal() {
@@ -94,7 +94,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ensure %s branch: %w", confluenceBranch, err)
 	}
 
-	fmt.Fprintf(out, "[confluencer] fetching page tree from Confluence...\n")
+	fmt.Fprintf(out, "[gfl] fetching page tree from Confluence...\n")
 
 	client := api.NewClient(creds.BaseURL, creds.User, creds.APIToken)
 
@@ -135,14 +135,14 @@ func runPull(cmd *cobra.Command, args []string) error {
 	plan.Deletes, plan.Orphaned, plan.Unknown = classifyMissing(client, plan.Deletes)
 
 	for _, o := range plan.Orphaned {
-		fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) moved outside sync scope — leaving local file in place\n", o.PageID, o.Path)
+		fmt.Fprintf(out, "[gfl] WARNING: page %s (%s) moved outside sync scope — leaving local file in place\n", o.PageID, o.Path)
 	}
 	for _, u := range plan.Unknown {
-		fmt.Fprintf(out, "[confluencer] WARNING: page %s (%s) status indeterminate — skipping this run\n", u.PageID, u.Path)
+		fmt.Fprintf(out, "[gfl] WARNING: page %s (%s) status indeterminate — skipping this run\n", u.PageID, u.Path)
 	}
 
 	if plan.IsNoOp() {
-		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
+		fmt.Fprintf(out, "[gfl] no changes from Confluence\n")
 		switchedBack = true
 		return gitutil.Checkout(root, origBranch)
 	}
@@ -168,7 +168,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 	switchedBack = true
 
 	if sha == "" {
-		fmt.Fprintf(out, "[confluencer] no changes from Confluence\n")
+		fmt.Fprintf(out, "[gfl] no changes from Confluence\n")
 		return nil
 	}
 
@@ -179,13 +179,13 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("merge %s into %s: %w", confluenceBranch, origBranch, err)
 	}
 	if conflict {
-		fmt.Fprintf(out, "[confluencer] CONFLICT: merge from %s has conflicts.\n", confluenceBranch)
-		fmt.Fprintf(out, "[confluencer]   Resolve with your editor and `git merge --continue`,\n")
-		fmt.Fprintf(out, "[confluencer]   or abort with `git merge --abort`.\n")
+		fmt.Fprintf(out, "[gfl] CONFLICT: merge from %s has conflicts.\n", confluenceBranch)
+		fmt.Fprintf(out, "[gfl]   Resolve with your editor and `git merge --continue`,\n")
+		fmt.Fprintf(out, "[gfl]   or abort with `git merge --abort`.\n")
 		return nil
 	}
 
-	fmt.Fprintf(out, "[confluencer] done — synced %d page(s) from Confluence\n", plan.ActionCount())
+	fmt.Fprintf(out, "[gfl] done — synced %d page(s) from Confluence\n", plan.ActionCount())
 	return nil
 }
 
@@ -319,9 +319,9 @@ func executePullPlan(client *api.Client, root, baseURL string, cfg *cfgpkg.Confi
 
 	// Deletes (file + per-page attachments dir).
 	for _, d := range plan.Deletes {
-		fmt.Fprintf(out, "[confluencer] delete: %s\n", d.Path)
+		fmt.Fprintf(out, "[gfl] delete: %s\n", d.Path)
 		if err := gitutil.Remove(root, d.Path); err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: git rm %s: %v\n", d.Path, err)
+			fmt.Fprintf(out, "[gfl] WARNING: git rm %s: %v\n", d.Path, err)
 		}
 		attDir := tree.AttachmentDir(d.Path, cfg.LocalRoot, cfg.AttachmentsDir)
 		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(attDir))); err == nil && info.IsDir() {
@@ -338,17 +338,17 @@ func executePullPlan(client *api.Client, root, baseURL string, cfg *cfgpkg.Confi
 	for _, pw := range plan.PendingWrites {
 		page, err := client.GetPage(pw.PageID)
 		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: fetch page %s: %v\n", pw.PageID, err)
+			fmt.Fprintf(out, "[gfl] WARNING: fetch page %s: %v\n", pw.PageID, err)
 			continue
 		}
 		opts := resolverForPage(pw.TargetPath, baseURL, cfg, ct, pm)
 		content, err := renderPage(pw.PageID, page.Body, page.Version, opts)
 		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: %v\n", err)
+			fmt.Fprintf(out, "[gfl] WARNING: %v\n", err)
 			continue
 		}
 		if err := writeLocalFile(root, pw.TargetPath, content); err != nil {
-			fmt.Fprintf(out, "[confluencer] ERROR: write %s: %v\n", pw.TargetPath, err)
+			fmt.Fprintf(out, "[gfl] ERROR: write %s: %v\n", pw.TargetPath, err)
 			continue
 		}
 		// Verb depends on whether this was a create or an update.
@@ -360,7 +360,7 @@ func executePullPlan(client *api.Client, root, baseURL string, cfg *cfgpkg.Confi
 			// either case to keep output unambiguous.
 			verb = "write"
 		}
-		fmt.Fprintf(out, "[confluencer] %s: %s\n", verb, pw.TargetPath)
+		fmt.Fprintf(out, "[gfl] %s: %s\n", verb, pw.TargetPath)
 
 		downloadPageAttachments(client, root, cfg, pw.PageID, pw.TargetPath, out)
 	}
@@ -372,7 +372,7 @@ func executePullPlan(client *api.Client, root, baseURL string, cfg *cfgpkg.Confi
 // subdirectory alongside its .md file.
 func applyRenames(root string, cfg *cfgpkg.Config, renames []renameOp, out io.Writer) error {
 	if hasCollisions(renames) {
-		stagingDir := filepath.Join(cfg.LocalRoot, ".confluencer-staging")
+		stagingDir := filepath.Join(cfg.LocalRoot, ".gfl-staging")
 		stagingAbs := filepath.Join(root, filepath.FromSlash(stagingDir))
 		_ = os.MkdirAll(stagingAbs, 0o755)
 		// Phase 1: move all sources into staging under stable names.
@@ -386,7 +386,7 @@ func applyRenames(root string, cfg *cfgpkg.Config, renames []renameOp, out io.Wr
 		}
 		// Phase 2: move from staging to final destinations.
 		for _, r := range renames {
-			fmt.Fprintf(out, "[confluencer] rename: %s → %s\n", r.From, r.To)
+			fmt.Fprintf(out, "[gfl] rename: %s → %s\n", r.From, r.To)
 			if err := gitutil.Move(root, stageMap[r.PageID], r.To); err != nil {
 				return fmt.Errorf("place rename %s → %s: %w", r.From, r.To, err)
 			}
@@ -396,7 +396,7 @@ func applyRenames(root string, cfg *cfgpkg.Config, renames []renameOp, out io.Wr
 		return nil
 	}
 	for _, r := range renames {
-		fmt.Fprintf(out, "[confluencer] rename: %s → %s\n", r.From, r.To)
+		fmt.Fprintf(out, "[gfl] rename: %s → %s\n", r.From, r.To)
 		if err := gitutil.Move(root, r.From, r.To); err != nil {
 			return fmt.Errorf("rename %s → %s: %w", r.From, r.To, err)
 		}
@@ -434,7 +434,7 @@ func renamePageAttachments(root string, cfg *cfgpkg.Config, r renameOp, out io.W
 		return
 	}
 	if err := gitutil.Move(root, oldDir, newDir); err != nil {
-		fmt.Fprintf(out, "[confluencer] WARNING: move attachments %s → %s: %v\n", oldDir, newDir, err)
+		fmt.Fprintf(out, "[gfl] WARNING: move attachments %s → %s: %v\n", oldDir, newDir, err)
 	}
 }
 
@@ -452,14 +452,14 @@ func writeLocalFile(root, repoPath, content string) error {
 func downloadPageAttachments(client *api.Client, root string, cfg *cfgpkg.Config, pageID, localPath string, out io.Writer) {
 	atts, err := client.GetAttachments(pageID, "")
 	if err != nil {
-		fmt.Fprintf(out, "[confluencer] WARNING: list attachments for %s: %v\n", pageID, err)
+		fmt.Fprintf(out, "[gfl] WARNING: list attachments for %s: %v\n", pageID, err)
 		return
 	}
 	attDir := tree.AttachmentDir(localPath, cfg.LocalRoot, cfg.AttachmentsDir)
 	for _, att := range atts {
 		data, err := client.DownloadAttachment(att.DownloadPath)
 		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: download %s: %v\n", att.Filename, err)
+			fmt.Fprintf(out, "[gfl] WARNING: download %s: %v\n", att.Filename, err)
 			continue
 		}
 		attPath := filepath.Join(root, filepath.FromSlash(attDir), att.Filename)

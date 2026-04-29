@@ -274,7 +274,7 @@ func TestCfToMd_UnknownMacro_Fenced(t *testing.T) {
 	// preserves it intact.
 	in := `<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>`
 	got := runCfToMd(t, in, CfToMdOpts{})
-	if !strings.HasPrefix(got, "<!-- confluencer:storage:block:v1:b64") {
+	if !strings.HasPrefix(got, "<!-- gfl:storage:block:v1:b64") {
 		t.Fatalf("expected fence, got:\n%s", got)
 	}
 	// And the fence should decode back to a structurally-equivalent macro

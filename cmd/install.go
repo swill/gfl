@@ -9,14 +9,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// hookNames lists the Git hooks that confluencer manages.
+// hookNames lists the Git hooks that gfl manages.
 var hookNames = []string{"pre-push", "post-commit", "post-merge", "post-rewrite"}
 
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Copy Git hook shims into .git/hooks/",
 	Long: `Copies the pre-push, post-commit, post-merge, and post-rewrite shims from
-.confluencer/hooks/ into .git/hooks/ and marks them executable. The shims
+.gfl/hooks/ into .git/hooks/ and marks them executable. The shims
 resolve the binary path at runtime, so subsequent upgrades do not require
 re-installation. Idempotent.`,
 	RunE: runInstall,
@@ -34,9 +34,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	return installHooks(root, cmd.OutOrStdout())
 }
 
-// installHooks copies hook shims from .confluencer/hooks/ into .git/hooks/.
+// installHooks copies hook shims from .gfl/hooks/ into .git/hooks/.
 func installHooks(root string, out io.Writer) error {
-	srcDir := filepath.Join(root, ".confluencer", "hooks")
+	srcDir := filepath.Join(root, ".gfl", "hooks")
 	dstDir := filepath.Join(root, ".git", "hooks")
 
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {

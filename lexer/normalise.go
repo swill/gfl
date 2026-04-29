@@ -444,5 +444,5 @@ func (r *mdRenderer) rawSource(n ast.Node) string {
 	if s := r.rawLines(n); s != "" {
 		return strings.TrimRight(s, "\n")
 	}
-	return fmt.Sprintf("<!-- confluencer-normaliser: unhandled node %T -->", n)
+	return fmt.Sprintf("<!-- gfl-normaliser: unhandled node %T -->", n)
 }

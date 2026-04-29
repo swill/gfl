@@ -1,4 +1,4 @@
-// Package gitutil wraps Git plumbing operations needed by the confluencer
+// Package gitutil wraps Git plumbing operations needed by the gfl
 // sync workflow: branch management, content reads at refs, diff parsing,
 // rename execution, and merge-state observation. All functions accept a
 // repoDir parameter so they operate on any repository, not just the working
@@ -12,7 +12,7 @@ import (
 )
 
 // SyncPrefix is the commit message prefix that identifies sync commits
-// produced by confluencer (pull and push both use it). Pull adds " @ <ts>";
+// produced by gfl (pull and push both use it). Pull adds " @ <ts>";
 // push adds "-push @ <ts>". Anything starting with this prefix is a
 // machine-generated sync commit.
 const SyncPrefix = "chore(sync): confluence"

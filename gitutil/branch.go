@@ -144,7 +144,7 @@ func mergeInProgress(repoDir string) bool {
 // headRef, with rename detection enabled (-M). pathspecs (optional) restrict
 // the diff to those paths or globs.
 //
-// Output semantics for confluencer's push flow when called as
+// Output semantics for gfl's push flow when called as
 // DiffBranches(repo, "confluence", "HEAD"):
 //   - A: file exists in HEAD but not confluence → create on Confluence.
 //   - D: file exists in confluence but not HEAD → delete on Confluence.

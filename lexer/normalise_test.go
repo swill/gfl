@@ -270,23 +270,23 @@ func TestNormalise_TableAlignment(t *testing.T) {
 
 func TestNormalise_HTMLBlockPreserved(t *testing.T) {
 	// The Confluence-native fence (HTML comment block) must survive verbatim.
-	in := `<!-- confluencer:storage:block:v1 -->
+	in := `<!-- gfl:storage:block:v1 -->
 <!--
 <ac:structured-macro ac:name="jira" ac:schema-version="1">
   <ac:parameter ac:name="key">PROJ-123</ac:parameter>
 </ac:structured-macro>
 -->
-<!-- /confluencer:storage:block -->
+<!-- /gfl:storage:block -->
 `
 	got := Normalise(in)
 	// The block should appear verbatim in the output (with the canonical
 	// trailing newline).
 	for _, needle := range []string{
-		"<!-- confluencer:storage:block:v1 -->",
+		"<!-- gfl:storage:block:v1 -->",
 		`<ac:structured-macro ac:name="jira" ac:schema-version="1">`,
 		`<ac:parameter ac:name="key">PROJ-123</ac:parameter>`,
 		"</ac:structured-macro>",
-		"<!-- /confluencer:storage:block -->",
+		"<!-- /gfl:storage:block -->",
 	} {
 		if !strings.Contains(got, needle) {
 			t.Errorf("HTML block dropped %q from output:\n%s", needle, got)
@@ -432,7 +432,7 @@ func TestNormalise_FixedPoint_Corpus(t *testing.T) {
 		"[link](https://ex.com)\n",
 		"This is ~~wrong~~.\n",
 		"***\n",
-		"<!-- confluencer:storage:block:v1 -->\n<!-- raw -->\n<!-- /confluencer:storage:block -->\n",
+		"<!-- gfl:storage:block:v1 -->\n<!-- raw -->\n<!-- /gfl:storage:block -->\n",
 	}
 	for _, in := range corpus {
 		once := Normalise(in)

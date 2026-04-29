@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/lexer"
-	"github.com/swill/confluencer/tree"
+	cfgpkg "github.com/swill/gfl/config"
+	"github.com/swill/gfl/lexer"
+	"github.com/swill/gfl/tree"
 )
 
 // confluenceBranch is the name of the persistent local branch that mirrors
@@ -20,8 +20,8 @@ const confluenceBranch = "confluence"
 // renderPage converts a Confluence storage-XML body to the canonical local
 // Markdown form, with confluence_page_id and confluence_version pinned in a
 // front-matter block at the top. This is the single source of truth for what
-// a managed file looks like — used by both `confluencer init` (initial seed)
-// and `confluencer pull` (subsequent updates) so the two paths produce
+// a managed file looks like — used by both `gfl init` (initial seed)
+// and `gfl pull` (subsequent updates) so the two paths produce
 // byte-identical output.
 func renderPage(pageID, body string, version int, opts lexer.CfToMdOpts) (string, error) {
 	mdBody, err := lexer.CfToMd(body, opts)
@@ -32,7 +32,7 @@ func renderPage(pageID, body string, version int, opts lexer.CfToMdOpts) (string
 	return lexer.ApplyFrontMatter(fm, lexer.Normalise(mdBody)), nil
 }
 
-// localManagedFile is one .md file on disk that confluencer recognises as a
+// localManagedFile is one .md file on disk that gfl recognises as a
 // Confluence-mirror file (it has front-matter with a confluence_page_id).
 type localManagedFile struct {
 	Path    string // repo-relative, slash-separated
@@ -43,7 +43,7 @@ type localManagedFile struct {
 // scanManagedFiles walks `localRoot` and returns every .md file that has
 // front-matter naming a confluence_page_id. Files without front-matter or
 // with malformed front-matter are skipped silently — they may belong to the
-// user, not to confluencer.
+// user, not to gfl.
 func scanManagedFiles(repoRoot, localRoot string) ([]localManagedFile, error) {
 	rootAbs := filepath.Join(repoRoot, filepath.FromSlash(localRoot))
 	if _, err := os.Stat(rootAbs); os.IsNotExist(err) {

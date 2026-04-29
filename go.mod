@@ -1,4 +1,4 @@
-module github.com/swill/confluencer
+module github.com/swill/gfl
 
 go 1.22
 

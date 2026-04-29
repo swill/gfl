@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/swill/confluencer/api"
-	cfgpkg "github.com/swill/confluencer/config"
-	"github.com/swill/confluencer/gitutil"
-	"github.com/swill/confluencer/lexer"
-	"github.com/swill/confluencer/tree"
+	"github.com/swill/gfl/api"
+	cfgpkg "github.com/swill/gfl/config"
+	"github.com/swill/gfl/gitutil"
+	"github.com/swill/gfl/lexer"
+	"github.com/swill/gfl/tree"
 )
 
 var pushCmd = &cobra.Command{
@@ -36,12 +36,12 @@ func init() {
 func runPush(cmd *cobra.Command, args []string) error {
 	// Push commits the sync chore directly on the working branch, which
 	// would otherwise fire the post-commit hook and recursively invoke
-	// `confluencer pull` — producing extra chore + merge commits and
+	// `gfl pull` — producing extra chore + merge commits and
 	// leaving the confluence ref pointing at the merge instead of the
 	// chore. Set the hook guard before any git operations so post-commit
 	// (and post-merge, post-rewrite) self-suppress for the duration of
 	// this run. This handles both hook-triggered and direct invocations.
-	_ = os.Setenv("CONFLUENCER_HOOK_ACTIVE", "1")
+	_ = os.Setenv("GFL_HOOK_ACTIVE", "1")
 
 	root, err := repoRoot()
 	if err != nil {
@@ -65,7 +65,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("the %q branch doesn't exist — run `confluencer pull` first to seed it", confluenceBranch)
+		return fmt.Errorf("the %q branch doesn't exist — run `gfl pull` first to seed it", confluenceBranch)
 	}
 
 	diffs, err := gitutil.DiffBranches(root, confluenceBranch, "HEAD", "*.md")
@@ -73,7 +73,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("diff %s..HEAD: %w", confluenceBranch, err)
 	}
 	if len(diffs) == 0 {
-		fmt.Fprintf(out, "[confluencer] no changes to push\n")
+		fmt.Fprintf(out, "[gfl] no changes to push\n")
 		return nil
 	}
 
@@ -105,20 +105,20 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	pm := tree.ComputePaths(ct, cfg.LocalRoot)
 
-	fmt.Fprintf(out, "[confluencer] %d file(s) to push\n", len(diffs))
+	fmt.Fprintf(out, "[gfl] %d file(s) to push\n", len(diffs))
 
 	var successes []pushOp
 	for _, d := range diffs {
 		op, err := applyDiff(client, cfg, root, d, &successes, out)
 		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: %s %s: %v\n", d.Action, displayPath(d), err)
+			fmt.Fprintf(out, "[gfl] WARNING: %s %s: %v\n", d.Action, displayPath(d), err)
 			continue
 		}
 		successes = append(successes, op)
 	}
 
 	if len(successes) == 0 {
-		fmt.Fprintf(out, "[confluencer] nothing pushed (all operations failed)\n")
+		fmt.Fprintf(out, "[gfl] nothing pushed (all operations failed)\n")
 		return nil
 	}
 
@@ -128,7 +128,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("advance %s branch: %w", confluenceBranch, err)
 	}
 
-	fmt.Fprintf(out, "[confluencer] done — %d/%d operation(s) succeeded\n", len(successes), len(diffs))
+	fmt.Fprintf(out, "[gfl] done — %d/%d operation(s) succeeded\n", len(successes), len(diffs))
 	return nil
 }
 
@@ -222,7 +222,7 @@ func applyAdded(client *api.Client, cfg *cfgpkg.Config, root, path string, prevS
 		return pushOp{}, fmt.Errorf("create page %s: %w", path, err)
 	}
 
-	fmt.Fprintf(out, "[confluencer] create: %s (page %s)\n", path, page.PageID)
+	fmt.Fprintf(out, "[gfl] create: %s (page %s)\n", path, page.PageID)
 	return pushOp{
 		Action: gitutil.ActionAdded, NewPath: path,
 		PageID: page.PageID, Version: page.Version,
@@ -256,7 +256,7 @@ func applyDeleted(client *api.Client, root, path string, out io.Writer) (pushOp,
 	if err := client.DeletePage(pageID); err != nil && !api.IsNotFound(err) {
 		return pushOp{}, fmt.Errorf("delete page %s: %w", pageID, err)
 	}
-	fmt.Fprintf(out, "[confluencer] delete: %s (page %s)\n", path, pageID)
+	fmt.Fprintf(out, "[gfl] delete: %s (page %s)\n", path, pageID)
 	return pushOp{
 		Action: gitutil.ActionDeleted, OldPath: path, PageID: pageID,
 	}, nil
@@ -305,7 +305,7 @@ func applyRenamed(client *api.Client, cfg *cfgpkg.Config, root, oldPath, newPath
 		return pushOp{}, err
 	}
 
-	fmt.Fprintf(out, "[confluencer] rename: %s → %s (page %s)\n", oldPath, newPath, pageID)
+	fmt.Fprintf(out, "[gfl] rename: %s → %s (page %s)\n", oldPath, newPath, pageID)
 	return pushOp{
 		Action: gitutil.ActionRenamed, OldPath: oldPath, NewPath: newPath,
 		PageID: pageID, Version: newVersion,
@@ -330,7 +330,7 @@ func updateExistingPage(client *api.Client, cfg *cfgpkg.Config, root, path, page
 		return pushOp{}, err
 	}
 
-	fmt.Fprintf(out, "[confluencer] update: %s (page %s)\n", path, pageID)
+	fmt.Fprintf(out, "[gfl] update: %s (page %s)\n", path, pageID)
 	return pushOp{
 		Action: gitutil.ActionModified, NewPath: path,
 		PageID: pageID, Version: newVersion,
@@ -360,7 +360,7 @@ func canonicalisePushOps(ops []pushOp, baseURL string, cfg *cfgpkg.Config, ct *t
 		opts := resolverForPage(op.NewPath, baseURL, cfg, ct, pm)
 		rt, err := lexer.CfToMd(op.StorageXML, opts)
 		if err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: canonicalise %s: %v\n", op.NewPath, err)
+			fmt.Fprintf(out, "[gfl] WARNING: canonicalise %s: %v\n", op.NewPath, err)
 			continue
 		}
 		op.HeadContent = rt
@@ -477,7 +477,7 @@ func ensurePushParents(client *api.Client, cfg *cfgpkg.Config, root, filePath st
 	title := lexer.ReverseSlugify(filepath.Base(dir) + ".md")
 	page, err := client.CreatePage(cfg.SpaceKey, grandparentID, title, "")
 	if err != nil {
-		fmt.Fprintf(out, "[confluencer] WARNING: create intermediate %s: %v\n", indexPath, err)
+		fmt.Fprintf(out, "[gfl] WARNING: create intermediate %s: %v\n", indexPath, err)
 		return grandparentID
 	}
 
@@ -489,7 +489,7 @@ func ensurePushParents(client *api.Client, cfg *cfgpkg.Config, root, filePath st
 	content := lexer.ApplyFrontMatter(fm, "")
 	_ = writeLocalFile(root, indexPath, content)
 
-	fmt.Fprintf(out, "[confluencer] create (intermediate): %s (page %s)\n", indexPath, page.PageID)
+	fmt.Fprintf(out, "[gfl] create (intermediate): %s (page %s)\n", indexPath, page.PageID)
 	*prevSuccesses = append(*prevSuccesses, pushOp{
 		Action: gitutil.ActionAdded, NewPath: indexPath,
 		PageID: page.PageID, Version: page.Version,
@@ -523,7 +523,7 @@ func advanceConfluenceBranch(root string, ops []pushOp, out io.Writer) error {
 
 	for _, op := range ops {
 		if err := applyOpToWorkingTree(root, op, out); err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: replay %s on %s: %v\n", op.NewPath, origBranch, err)
+			fmt.Fprintf(out, "[gfl] WARNING: replay %s on %s: %v\n", op.NewPath, origBranch, err)
 		}
 	}
 
@@ -565,7 +565,7 @@ func applyOpToWorkingTree(root string, op pushOp, out io.Writer) error {
 	case gitutil.ActionDeleted:
 		// Best-effort: ignore "not found" so a noop replay doesn't fail.
 		if err := gitutil.Remove(root, op.OldPath); err != nil {
-			fmt.Fprintf(out, "[confluencer] WARNING: git rm %s: %v\n", op.OldPath, err)
+			fmt.Fprintf(out, "[gfl] WARNING: git rm %s: %v\n", op.OldPath, err)
 		}
 		return nil
 	case gitutil.ActionRenamed:

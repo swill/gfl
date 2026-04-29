@@ -3,7 +3,7 @@ package tree
 import (
 	"path"
 
-	"github.com/swill/confluencer/lexer"
+	"github.com/swill/gfl/lexer"
 )
 
 // PathMap maps every page in a CfTree to its expected local file path.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/swill/confluencer/cmd"
+	"github.com/swill/gfl/cmd"
 )
 
 func main() {

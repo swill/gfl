@@ -12,9 +12,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "confluencer",
+	Use:   "gfl",
 	Short: "Deterministic bidirectional sync between Markdown and Confluence",
-	Long: `confluencer synchronises Markdown files in a Git repository with
+	Long: `gfl synchronises Markdown files in a Git repository with
 pages in an Atlassian Confluence instance. It operates through Git hooks
 and the Confluence REST API, with no external runtime dependencies.`,
 	SilenceUsage:  true,

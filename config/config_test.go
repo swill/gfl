@@ -9,7 +9,7 @@ import (
 
 func TestLoadConfig_Valid(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".confluencer.json")
+	path := filepath.Join(dir, ".gfl.json")
 	os.WriteFile(path, []byte(`{
 		"confluence_root_page_id": "123456789",
 		"confluence_space_key": "DOCS",
@@ -37,7 +37,7 @@ func TestLoadConfig_Valid(t *testing.T) {
 
 func TestLoadConfig_MissingRootPageID(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".confluencer.json")
+	path := filepath.Join(dir, ".gfl.json")
 	os.WriteFile(path, []byte(`{"local_root":"docs/"}`), 0o644)
 
 	_, err := LoadConfig(path)
@@ -51,7 +51,7 @@ func TestLoadConfig_MissingRootPageID(t *testing.T) {
 
 func TestLoadConfig_MissingLocalRoot(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".confluencer.json")
+	path := filepath.Join(dir, ".gfl.json")
 	os.WriteFile(path, []byte(`{"confluence_root_page_id":"1"}`), 0o644)
 
 	_, err := LoadConfig(path)
@@ -64,7 +64,7 @@ func TestLoadConfig_MissingLocalRoot(t *testing.T) {
 }
 
 func TestLoadConfig_FileNotFound(t *testing.T) {
-	_, err := LoadConfig("/nonexistent/.confluencer.json")
+	_, err := LoadConfig("/nonexistent/.gfl.json")
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -72,7 +72,7 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 
 func TestLoadConfig_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".confluencer.json")
+	path := filepath.Join(dir, ".gfl.json")
 	os.WriteFile(path, []byte("{invalid"), 0o644)
 
 	_, err := LoadConfig(path)
@@ -83,7 +83,7 @@ func TestLoadConfig_InvalidJSON(t *testing.T) {
 
 func TestConfig_SaveAndReload(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".confluencer.json")
+	path := filepath.Join(dir, ".gfl.json")
 
 	cfg := &Config{
 		RootPageID:     "999",

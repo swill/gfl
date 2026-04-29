@@ -15,5 +15,5 @@ func repoRoot() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// configFile is the name of the tracked confluencer configuration file.
-const configFile = ".confluencer.json"
+// configFile is the name of the tracked gfl configuration file.
+const configFile = ".gfl.json"

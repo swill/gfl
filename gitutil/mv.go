@@ -61,9 +61,9 @@ func Checkout(repoDir, ref string) error {
 }
 
 // StashPush stashes the current working tree changes (tracked + untracked)
-// under a confluencer-named stash entry.
+// under a gfl-named stash entry.
 func StashPush(repoDir string) error {
-	cmd := exec.Command("git", "stash", "push", "--include-untracked", "-m", "confluencer-stash")
+	cmd := exec.Command("git", "stash", "push", "--include-untracked", "-m", "gfl-stash")
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git stash push: %s: %w", out, err)

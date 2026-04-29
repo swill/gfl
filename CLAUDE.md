@@ -1,12 +1,12 @@
-# CLAUDE.md — confluencer
+# CLAUDE.md — gfl
 
 ## Project Overview
 
-`confluencer` is a standalone Go CLI that implements deterministic, bidirectional synchronisation between Markdown files tracked in a Git repository and pages in an Atlassian Confluence instance. It operates through Git hooks and the Confluence REST API — no CI, no external services, no LLMs, no Pandoc.
+`gfl` is a standalone Go CLI that implements deterministic, bidirectional synchronisation between Markdown files tracked in a Git repository and pages in an Atlassian Confluence instance. It operates through Git hooks and the Confluence REST API — no CI, no external services, no LLMs, no Pandoc.
 
 It mirrors the hierarchical structure of a Confluence space rooted at a configured anchor page as a directory tree of Markdown files. Each managed `.md` file carries its Confluence identity in a front-matter block; a persistent local Git branch named `confluence` represents the last-known Confluence-side tree state. Pull and push are diff/merge operations between that branch and your working branch.
 
-`confluencer` is maintained as its own repository. Developers install the binary onto their PATH (`go install`, release artifact, or package manager). Consuming repositories contain only configuration and hook shims — no Go toolchain required.
+`gfl` is maintained as its own repository. Developers install the binary onto their PATH (`go install`, release artifact, or package manager). Consuming repositories contain only configuration and hook shims — no Go toolchain required.
 
 ## Core Design Principles
 
@@ -21,24 +21,24 @@ It mirrors the hierarchical structure of a Confluence space rooted at a configur
 ## Repository Structure
 
 ```
-confluencer/
+gfl/
   main.go
   cmd/       root, init, install, push, pull, status, version, render, helpers
   lexer/     pure text transforms: normalise, frontmatter, cf_to_md, md_to_cf, fence, slugify (incl. DisambiguateSiblings)
   api/       Confluence REST v1 client: content, attachments
   gitutil/   branch/diff/merge/stash/mv primitives, content-at-ref reads
   tree/      CfTree/CfNode, PathMap (slug-based path computation), AttachmentDir
-  config/    .confluencer.json, .env credential loading
+  config/    .gfl.json, .env credential loading
 ```
 
 ## Consuming Repository
 
 ```
 <repo-root>/
-  .confluencer/hooks/        # tracked shims: pre-push, post-commit, post-merge, post-rewrite
-  .confluencer.json          # tracked — root page ID, cached space key, local root, attachments dir
+  .gfl/hooks/        # tracked shims: pre-push, post-commit, post-merge, post-rewrite
+  .gfl.json          # tracked — root page ID, cached space key, local root, attachments dir
   .env                       # gitignored — Confluence credentials
-  docs/                      # local root (configured in .confluencer.json)
+  docs/                      # local root (configured in .gfl.json)
     index.md
     _attachments/            # page-tree-mirrored assets
     architecture/
@@ -51,7 +51,7 @@ Plus a local-only `confluence` branch maintained by the tool.
 
 ## Configuration
 
-### `.confluencer.json` (tracked)
+### `.gfl.json` (tracked)
 
 ```json
 {
@@ -62,7 +62,7 @@ Plus a local-only `confluence` branch maintained by the tool.
 }
 ```
 
-`confluence_space_key` is cached on `confluencer init` from the root page metadata so that new-page POST calls don't re-fetch it every run.
+`confluence_space_key` is cached on `gfl init` from the root page metadata so that new-page POST calls don't re-fetch it every run.
 
 ### `.env` (gitignored)
 
@@ -102,7 +102,7 @@ A persistent local Git branch named `confluence` is the canonical representation
 - **Advanced by pull** with a `chore(sync): confluence @ <ts>` commit *on the `confluence` branch itself*, which is then merged into the working branch.
 - **Advanced by push** by committing `chore(sync): confluence-push @ <ts>` on the working branch and fast-forwarding `confluence` to that commit (`gitutil.SetBranchRef`). Post-push, `confluence` and the working branch tip are byte-equal.
 - **Local-only by default.** You can push it to `origin` if you want a shared canonical view, but the tool doesn't require it.
-- **Don't commit to it manually.** Treat it as machine-managed. The hooks and direct invocations of `confluencer pull` / `push` are the only legitimate writers.
+- **Don't commit to it manually.** Treat it as machine-managed. The hooks and direct invocations of `gfl pull` / `push` are the only legitimate writers.
 
 ## Tree Structure
 
@@ -180,7 +180,7 @@ Pure functions — no I/O. The orchestrator injects `PageResolver` and `Attachme
 Constructs Markdown can't represent (Jira macros, user mentions, panels, layouts, unknown structured macros) are preserved as a single HTML-comment block with base64-encoded storage XML:
 
 ```
-<!-- confluencer:storage:block:v1:b64
+<!-- gfl:storage:block:v1:b64
 <base64 body wrapped at 76 cols>
 -->
 ```
@@ -197,9 +197,9 @@ The primary correctness property:
 
 ## Pull (`cmd/pull.go`)
 
-Triggered by post-commit, post-merge, post-rewrite, and direct invocation. Hook shims are guarded by `CONFLUENCER_HOOK_ACTIVE` to prevent recursion (pull creates its own commits).
+Triggered by post-commit, post-merge, post-rewrite, and direct invocation. Hook shims are guarded by `GFL_HOOK_ACTIVE` to prevent recursion (pull creates its own commits).
 
-1. Acquire an exclusive file lock at `<git-dir>/confluencer-pull.lock`. If held, exit silently — the holder will do the work. Direct invocation reclaims stale locks.
+1. Acquire an exclusive file lock at `<git-dir>/gfl-pull.lock`. If held, exit silently — the holder will do the work. Direct invocation reclaims stale locks.
 2. Refuse to operate with a dirty working tree (refuse rather than stash, to keep behaviour predictable).
 3. Ensure the local `confluence` branch exists (seed from HEAD on first run via `EnsureBranchFromHead`).
 4. Fetch the Confluence tree (structure only — bodies fetched on demand) and compute the expected `PathMap`.
@@ -219,13 +219,13 @@ Triggered by post-commit, post-merge, post-rewrite, and direct invocation. Hook 
 11. Switch back to the working branch.
 12. `git merge confluence`. On conflict, surface guidance ("resolve with your editor and `git merge --continue`") and exit 0 — leaving the merge state for the user.
 
-Two-phase rename protocol (when any rename's destination equals another rename's source): move all sources into `<local_root>/.confluencer-staging/<i>.md`, then move each staged file to its final path. The staging directory is created and removed within the same sync and never appears in a committed tree.
+Two-phase rename protocol (when any rename's destination equals another rename's source): move all sources into `<local_root>/.gfl-staging/<i>.md`, then move each staged file to its final path. The staging directory is created and removed within the same sync and never appears in a committed tree.
 
 ## Push (`cmd/push.go`)
 
 Triggered by pre-push and direct invocation.
 
-1. Set `CONFLUENCER_HOOK_ACTIVE=1` immediately so the post-commit / post-merge / post-rewrite hooks self-suppress when push commits its sync chore on the working branch (otherwise they'd recursively invoke `confluencer pull`).
+1. Set `GFL_HOOK_ACTIVE=1` immediately so the post-commit / post-merge / post-rewrite hooks self-suppress when push commits its sync chore on the working branch (otherwise they'd recursively invoke `gfl pull`).
 2. Verify the `confluence` branch exists (error otherwise — direct user to run pull first).
 3. `gitutil.DiffBranches(confluenceBranch, "HEAD", "*.md")` with rename detection. If empty, "no changes to push" and exit.
 4. Fetch the Confluence tree once up front so step 7's canonicalisation can run.
@@ -247,25 +247,25 @@ Failures don't queue. Whatever didn't succeed will simply re-appear in the next 
 
 ## Hooks
 
-`confluencer init` writes shims to `.confluencer/hooks/` and installs them into `.git/hooks/` in the same step. `confluencer install` performs just the copy — used when cloning an existing confluencer-managed repo.
+`gfl init` writes shims to `.gfl/hooks/` and installs them into `.git/hooks/` in the same step. `gfl install` performs just the copy — used when cloning an existing gfl-managed repo.
 
 ```sh
 # pre-push
 #!/bin/sh
 set -e
-confluencer push
+gfl push
 
 # post-commit / post-merge / post-rewrite (same shape)
 #!/bin/sh
 set -e
-if [ -n "$CONFLUENCER_HOOK_ACTIVE" ]; then
+if [ -n "$GFL_HOOK_ACTIVE" ]; then
   exit 0
 fi
-export CONFLUENCER_HOOK_ACTIVE=1
-confluencer pull
+export GFL_HOOK_ACTIVE=1
+gfl pull
 ```
 
-- `pre-push` has no shim-level guard. Push self-suppresses recursive hook firing by setting `CONFLUENCER_HOOK_ACTIVE=1` before any git operations — so when push commits its sync chore on the working branch, the post-commit hook exits early.
+- `pre-push` has no shim-level guard. Push self-suppresses recursive hook firing by setting `GFL_HOOK_ACTIVE=1` before any git operations — so when push commits its sync chore on the working branch, the post-commit hook exits early.
 - `post-commit` runs pull after every commit so Confluence-side edits are caught before the next push.
 - `post-rewrite` re-establishes sync after `rebase` / `commit --amend`.
 - The pull file lock prevents concurrent pulls; the env-var guard prevents pull's own commit from re-firing pull.
@@ -288,12 +288,12 @@ Basic Auth. See `api/content.go` and `api/attachments.go` for the exact endpoint
 
 | Command | Description |
 |---|---|
-| `confluencer init --page-id <id> [--local-root <path>]` | Populate local repo from an existing Confluence tree. Writes config, files (with front-matter), and hook shims; installs hooks. Does not commit. |
-| `confluencer install` | Copy hook shims from `.confluencer/hooks/` into `.git/hooks/`. Idempotent. |
-| `confluencer push` | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to it. |
-| `confluencer pull` | Update the `confluence` branch from Confluence and merge it into the current working branch. |
-| `confluencer status` | List files differing between the working branch and `confluence`. |
-| `confluencer version` | Print version, commit, build date. |
+| `gfl init --page-id <id> [--local-root <path>]` | Populate local repo from an existing Confluence tree. Writes config, files (with front-matter), and hook shims; installs hooks. Does not commit. |
+| `gfl install` | Copy hook shims from `.gfl/hooks/` into `.git/hooks/`. Idempotent. |
+| `gfl push` | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to it. |
+| `gfl pull` | Update the `confluence` branch from Confluence and merge it into the current working branch. |
+| `gfl status` | List files differing between the working branch and `confluence`. |
+| `gfl version` | Print version, commit, build date. |
 
 ## Implementation Invariants
 

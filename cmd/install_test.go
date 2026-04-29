@@ -34,7 +34,7 @@ func TestRunInstall(t *testing.T) {
 	dir := initTestRepo(t)
 
 	// Create hook shims.
-	hooksDir := filepath.Join(dir, ".confluencer", "hooks")
+	hooksDir := filepath.Join(dir, ".gfl", "hooks")
 	os.MkdirAll(hooksDir, 0o755)
 	for _, name := range hookNames {
 		content := "#!/bin/sh\necho " + name + "\n"
@@ -85,7 +85,7 @@ func TestRunInstall_MissingHooksDir(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(origDir)
 
-	// Don't create .confluencer/hooks/ — should fail.
+	// Don't create .gfl/hooks/ — should fail.
 	err := installCmd.RunE(installCmd, nil)
 	if err == nil {
 		t.Fatal("expected error when hooks dir is missing")
@@ -94,7 +94,7 @@ func TestRunInstall_MissingHooksDir(t *testing.T) {
 
 func TestRunInstall_Idempotent(t *testing.T) {
 	dir := initTestRepo(t)
-	hooksDir := filepath.Join(dir, ".confluencer", "hooks")
+	hooksDir := filepath.Join(dir, ".gfl", "hooks")
 	os.MkdirAll(hooksDir, 0o755)
 	for _, name := range hookNames {
 		os.WriteFile(filepath.Join(hooksDir, name), []byte("#!/bin/sh\n"), 0o644)

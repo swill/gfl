@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/swill/confluencer/tree"
+	"github.com/swill/gfl/tree"
 )
 
 // pageResponse is the JSON shape returned by GET /rest/api/content/{id}.

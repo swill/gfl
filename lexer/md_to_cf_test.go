@@ -341,7 +341,7 @@ func TestMdToCf_Fence_SplicedVerbatim(t *testing.T) {
 	if !strings.Contains(got, originalXML) {
 		t.Errorf("fenced XML not spliced back:\n%s", got)
 	}
-	if strings.Contains(got, "confluencer:storage") {
+	if strings.Contains(got, "gfl:storage") {
 		t.Errorf("fence marker leaked into storage output: %s", got)
 	}
 }
