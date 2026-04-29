@@ -4,22 +4,32 @@ Deterministic, bidirectional synchronisation between Markdown files in a Git rep
 
 `confluencer` operates entirely through Git hooks and the Confluence REST API. It mirrors a Confluence space's hierarchy as a directory tree of Markdown files, and uses Git's native branch and merge machinery to reconcile changes from both sides.
 
-## How it works in one paragraph
+Each managed `.md` file carries a small front-matter block recording its `confluence_page_id` and `confluence_version`. A persistent local Git branch named `confluence` always represents the last-known Confluence-side state. `confluencer pull` updates that branch from Confluence and merges it into your working branch. `confluencer push` diffs your working branch against `confluence`, sends the differences to Confluence, then commits a sync chore on your working branch and fast-forwards `confluence` to match. Conflicts are ordinary `git merge` conflicts, resolved with your normal tools.
 
-Each managed `.md` file carries a small front-matter block recording its `confluence_page_id` and `confluence_version`. A persistent local Git branch named `confluence` always represents the last-known Confluence-side state. `confluencer pull` updates that branch from Confluence, then merges it into your working branch using `git merge`. `confluencer push` diffs your working branch against the `confluence` branch, sends the differences to Confluence, then advances the `confluence` branch to match. Conflicts are ordinary `git merge` conflicts, resolved with your normal tools.
+Highlights:
 
-## Features
-
-- **Bidirectional sync** driven by Git events — commits trigger pull, pushes trigger push.
-- **Page identity travels with the file**. The `confluence_page_id` is in front-matter, so renames, moves, and copies preserve the link to the Confluence page automatically.
+- **Bidirectional**, driven by Git events — commits trigger pull, pushes trigger push.
+- **Page identity travels with the file**. Renames, moves, and copies preserve the link to the Confluence page automatically.
 - **Tree-aware**. Confluence's hierarchy mirrors a directory tree; pages with children become directories with `index.md`.
-- **Deterministic conversion**. Purpose-built Go lexers convert between Markdown and Confluence storage XML; round-trips are byte-stable for every supported construct.
+- **Deterministic conversion**. Purpose-built Go lexers; round-trips are byte-stable for every supported construct.
 - **Unsupported constructs preserved verbatim** via a base64-encoded HTML-comment fence — Confluence macros, panels, mentions, etc. survive round-trips intact.
-- **Conflicts are git conflicts**. When the two sides genuinely diverge, `git merge` produces conflict markers; you resolve them with your editor and `git merge --continue`.
-- **Self-recovering on partial push failure**. Operations that fail simply re-appear in the next push's diff. There is no separate pending queue.
-- **No external dependencies**. The binary is self-contained — no CI, no Pandoc, no LLMs. Consuming repositories need only the binary, a `.env` file, and a POSIX shell.
+- **Conflicts are git conflicts**. Resolve them with your editor and `git merge --continue`.
+- **Self-recovering on partial push failure**. Operations that fail simply re-appear in the next push's diff.
+- **No external dependencies** beyond Git and the binary itself — no CI, no Pandoc, no LLMs.
 
 ## Installation
+
+`confluencer` is installed per-developer, not bundled with consuming repositories. Each developer puts the binary on their `PATH`.
+
+### From release binaries
+
+Pre-compiled binaries are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Download the appropriate archive, extract, and place `confluencer` somewhere on your `PATH` (e.g. `/usr/local/bin`).
+
+Verify the install:
+
+```sh
+confluencer version
+```
 
 ### From source
 
@@ -29,13 +39,11 @@ Requires Go 1.22 or later.
 go install github.com/swill/confluencer@latest
 ```
 
-### From release binaries
+This drops the binary in `$(go env GOPATH)/bin`. Make sure that directory is on your `PATH`.
 
-Pre-compiled binaries are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Place the binary on your `PATH`. `confluencer` is installed per-developer, not bundled with consuming repositories.
+## Getting started: a new repository
 
-## Setup
-
-### 1. Initialise a repository from an existing Confluence tree
+Use `confluencer init` to initialise a Git repository from an existing Confluence page tree.
 
 ```sh
 cd your-repo
@@ -51,80 +59,16 @@ EOF
 confluencer init --page-id <root-page-id> [--local-root docs/]
 ```
 
-This fetches the full page tree, converts each page to Markdown (with front-matter), downloads attachments, and writes:
+`init` fetches the full page tree, converts each page to Markdown (with front-matter), downloads attachments, and writes:
 
-- `docs/` (or your chosen `--local-root`) — the Markdown file tree, every file carrying `confluence_page_id` and `confluence_version` in its front-matter
-- `.confluencer.json` — configuration (root page ID, space key, local root)
+- `docs/` (or your chosen `--local-root`) — the Markdown file tree
+- `.confluencer.json` — configuration (root page ID, cached space key, local root, attachments dir)
 - `.gitignore` entries for `.env`
 - `.confluencer/hooks/` shims, installed into `.git/hooks/`
 
 Review the output, then `git add` and commit. Your first post-commit hook will seed the local `confluence` branch from your tree state.
 
-### 2. Developer onboarding (existing repo)
-
-```sh
-git clone <repo>
-cd <repo>
-
-# Set up credentials
-cp .env.example .env
-# Edit .env with your Confluence credentials
-
-# Install Git hooks (assumes `confluencer` is on your PATH — see Installation)
-confluencer install
-```
-
-After this, ordinary Git operations stay in sync with Confluence:
-
-- `git commit` → post-commit hook runs `confluencer pull`
-- `git push` → pre-push hook runs `confluencer push`
-- `git merge` / `git rebase` → post-merge / post-rewrite hooks also run pull
-
-The pull hooks are guarded by `CONFLUENCER_HOOK_ACTIVE` so the commit that pull itself creates doesn't re-trigger pull.
-
-## How it works (in detail)
-
-### The `confluence` branch
-
-`confluencer` maintains a local Git branch named `confluence` whose tip always represents the last-known Confluence-side state — every file there carries `confluence_page_id` and `confluence_version` in front-matter. Pull writes commits to it; push reads it to find page identities. Treat it as machine-managed; don't commit to it directly.
-
-It's local-only by default. You can push it to `origin` if you want to share the canonical Confluence-mirror state across developers, but the tool doesn't require it.
-
-### Pull (post-commit / post-merge / post-rewrite hooks)
-
-After any local commit, merge, or rebase, `confluencer pull` runs:
-
-1. Acquires an exclusive file lock at `<git-dir>/confluencer-pull.lock`; exits silently if another pull already holds it.
-2. Fetches the full Confluence page tree (structure only — bodies are fetched on demand).
-3. Switches to the `confluence` branch.
-4. Reads each managed file's front-matter to determine the current page ID → path mapping for this branch.
-5. Computes a plan: pages on Confluence not in the local tree → write; pages whose version changed → re-fetch and rewrite; pages whose path changed → `git mv`; pages no longer on Confluence (confirmed via direct GET → 404) → delete.
-6. Applies the plan, downloads any new/changed attachments, and commits as `chore(sync): confluence @ <ts>`.
-7. Switches back to the working branch and runs `git merge confluence`. Conflicts surface as standard merge conflicts — resolve with your editor and `git merge --continue`.
-
-### Push (pre-push hook)
-
-When you `git push`, `confluencer push` runs:
-
-1. Diffs the working branch against the `confluence` branch with rename detection (`git diff -M`).
-2. For each changed `.md` file:
-   - **Added** → creates a new Confluence page (or, if HEAD's front-matter already names a real `page_id`, adopts that page and updates).
-   - **Modified** → reads the page ID from the `confluence` branch's copy of the file and PUTs the new body. On 409, refetches the version and retries once.
-   - **Deleted** → deletes the Confluence page (404 treated as success).
-   - **Renamed** → updates the page's title (subject to the Title Stability Rule) and parent (if the directory changed) on Confluence.
-3. Replays every successful operation on the `confluence` branch as a file write/move/delete with canonical front-matter, and commits as `chore(sync): confluence-push @ <ts>`.
-
-If any operation fails, it simply re-appears in the next push's diff and is retried. There is no separate pending file.
-
-### Status
-
-```sh
-confluencer status
-```
-
-Lists every `.md` file that differs between the working branch and the `confluence` branch — i.e. exactly what `confluencer push` would attempt to send.
-
-## File layout
+### What gets written
 
 Given a Confluence tree:
 
@@ -168,20 +112,20 @@ confluence_version: 12
 ---
 
 # Page Title
+
 ...
 ```
 
-Key conventions:
+Conventions:
 
-- Pages with children become directories containing `index.md`.
-- Leaf pages are flat `.md` files.
-- Attachments live under `_attachments/` mirroring the page hierarchy.
+- Pages with children become directories containing `index.md`; leaf pages are flat `.md` files.
 - Filenames are deterministically slugified from page titles.
+- Attachments live under `_attachments/` mirroring the page hierarchy.
 - Front-matter is canonicalised on every pull (sorted keys, double-quoted strings) so byte-stable round-trips are preserved.
 
-## Configuration
+### Configuration files
 
-### `.confluencer.json` (tracked)
+`.confluencer.json` (tracked):
 
 ```json
 {
@@ -192,7 +136,7 @@ Key conventions:
 }
 ```
 
-### `.env` (gitignored)
+`.env` (gitignored):
 
 ```
 CONFLUENCE_BASE_URL=https://yourorg.atlassian.net/wiki
@@ -202,23 +146,77 @@ CONFLUENCE_API_TOKEN=your_api_token
 
 Environment variables of the same names take precedence over `.env`.
 
-## CLI reference
+## Getting started: an existing confluencer repository
 
-| Command | Description |
-|---|---|
-| `confluencer init --page-id <id> [--local-root <path>]` | Populate the repo from an existing Confluence tree; writes config, files (with front-matter), and hook shims, then installs hooks. |
-| `confluencer install` | Copy hook shims from `.confluencer/hooks/` into `.git/hooks/` (idempotent). |
-| `confluencer push` | Diff against the `confluence` branch and send changes to Confluence. |
-| `confluencer pull` | Sync Confluence into the `confluence` branch and merge it. |
-| `confluencer status` | Show files that differ between the working branch and `confluence`. |
-| `confluencer version` | Print version, commit, and build date. |
+When joining a repository someone else has already run `confluencer init` on:
 
-## Development
+```sh
+git clone <repo>
+cd <repo>
+
+# Set up credentials
+cp .env.example .env
+# Edit .env with your Confluence credentials
+
+# Install Git hooks (assumes `confluencer` is on your PATH)
+confluencer install
+```
+
+`install` is idempotent; it just copies hook shims from `.confluencer/hooks/` into `.git/hooks/`.
+
+After this, ordinary Git operations stay in sync with Confluence:
+
+- `git commit` → post-commit hook runs `confluencer pull`
+- `git push` → pre-push hook runs `confluencer push`
+- `git merge` / `git rebase` → post-merge / post-rewrite hooks also run pull
+
+The pull hooks are guarded by `CONFLUENCER_HOOK_ACTIVE` so the commit that pull itself creates doesn't re-trigger pull. Push self-suppresses the same hooks while it commits its own sync chore.
+
+### Daily commands
+
+| Command               | What it does                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `confluencer status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt.                                                 |
+| `confluencer pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts.                       |
+| `confluencer push`    | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to match. |
+| `confluencer version` | Print version, commit, and build date.                                                                                                                  |
+
+You usually don't run `pull` or `push` directly — Git hooks handle them. Use `status` to see what's pending; use the explicit commands when troubleshooting.
+
+### How sync works
+
+The local branch `confluence` is the canonical "last-known Confluence state" — every file there carries `confluence_page_id` and `confluence_version` in front-matter. It's machine-managed; don't commit to it directly.
+
+**Pull** (post-commit / post-merge / post-rewrite):
+
+1. Fetches the Confluence page tree.
+2. On the `confluence` branch, applies any creates / updates / renames / deletes (deletes confirmed via direct `GET` → 404) and downloads attachments.
+3. Commits as `chore(sync): confluence @ <ts>`.
+4. Switches back to the working branch and runs `git merge confluence`.
+
+**Push** (pre-push):
+
+1. Diffs the working branch against `confluence` with rename detection.
+2. For each changed `.md`: creates, updates (with 409 retry), deletes, or renames the corresponding Confluence page (renames apply the Title Stability Rule to avoid capitalisation drift).
+3. Round-trips each pushed body through `CfToMd` so its committed form matches what a future pull would produce.
+4. Commits `chore(sync): confluence-push @ <ts>` on the working branch and fast-forwards `confluence` to that commit. After a successful push, `confluence` and the working branch tip are byte-equal.
+
+Failed operations don't queue — they re-appear in the next push's diff and are retried then.
+
+## Developing confluencer
+
+This section is for working on `confluencer` itself, not for using it.
 
 ### Build
 
 ```sh
 go build -o confluencer .
+```
+
+Or with version metadata:
+
+```sh
+make build
 ```
 
 ### Test
@@ -227,19 +225,25 @@ go build -o confluencer .
 go test ./...
 ```
 
-Tests use real temporary Git repositories (`gitutil/`, `cmd/`) and `httptest.NewServer` (`api/`). No external services required.
+Tests use real temporary Git repositories (`gitutil/`, `cmd/`) and `httptest.NewServer` (`api/`). The `cmd/` package also includes end-to-end scenario tests against an in-memory mock Confluence (`cmd/e2e_mock_test.go`). No external services required.
 
 ### Project structure
 
 ```
-main.go          Entry point
-cmd/             CLI commands (Cobra)
-lexer/           Markdown ↔ Confluence storage XML conversion + front-matter
-api/             Confluence REST API client
-gitutil/         Git operations (branches, diffs, merges, stash, mv/rm)
-tree/            Confluence tree representation, path computation, attachment paths
-config/          Configuration and credential loading
+main.go      Entry point
+cmd/         CLI commands (Cobra): init, install, push, pull, status, version
+lexer/       Pure text transforms: normalise, frontmatter, cf_to_md, md_to_cf, fence, slugify
+api/         Confluence REST v1 client (content, attachments)
+gitutil/     Git primitives: branch, diff, merge, stash, mv/rm, content-at-ref
+tree/        CfTree/CfNode, PathMap (slug-based path computation), AttachmentDir
+config/      .confluencer.json and .env credential loading
 ```
+
+See `CLAUDE.md` for the design rationale, sync invariants, and the round-trip idempotency contract that the lexers must satisfy.
+
+### Releases
+
+Release binaries are built via the `Makefile` `release` target and published as GitHub release artifacts.
 
 ## License
 
