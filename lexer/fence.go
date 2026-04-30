@@ -102,3 +102,68 @@ func IsBlockFence(s string) bool {
 	}
 	return strings.TrimRight(first, " \t") == ""
 }
+
+// Inline fence — a single self-closing HTML element used for storage
+// constructs that appear inside a paragraph (e.g. <ac:emoticon>, inline
+// <ac:structured-macro>).
+//
+// Shape:
+//
+//	<gfl-fence data-v1-b64="BASE64DATA"/>
+//
+// The element form is chosen specifically to avoid CommonMark's HTML block
+// detection. The earlier comment form `<!--gfl:...-->` matched HTML block
+// Type 2 (any line starting with `<!--`), which silently swallowed any
+// paragraph that began with a fence — including the rest of that line and
+// any later fences — and the block fell to the HTML-block escape path on
+// push.
+//
+// `gfl-fence` is a custom element name (ASCII letter + hyphen-allowed name
+// per the CommonMark/HTML5 tag-name rule). It is:
+//
+//   - Not in the Type 6 HTML-block tag-name list (those are well-known
+//     block elements like div, p, table); and
+//   - Not eligible for Type 7 at start-of-line unless the tag is followed
+//     only by whitespace or end-of-line — so a paragraph starting with a
+//     fence followed by more text/fences stays a paragraph.
+//
+// Base64 alphabet (`A-Z a-z 0-9 + / =`) is safe inside an HTML attribute
+// value quoted with `"` — none of the alphabet characters require
+// escaping, and there is no `"` to terminate the attribute prematurely.
+const (
+	inlineFencePrefix = `<gfl-fence data-v1-b64="`
+	inlineFenceSuffix = `"/>`
+)
+
+// EncodeInlineFence wraps a verbatim Confluence storage XML payload in the
+// v1/b64 inline fence — a single self-closing custom-element tag. The
+// result is always one line and contains no characters that would
+// prematurely close the surrounding paragraph or trigger HTML-block
+// detection at line start.
+func EncodeInlineFence(storageXML string) string {
+	return inlineFencePrefix + base64.StdEncoding.EncodeToString([]byte(storageXML)) + inlineFenceSuffix
+}
+
+// DecodeInlineFence inspects a candidate raw-inline-HTML segment and, if it
+// matches the inline fence shape, returns the original storage XML.
+// ok=false means the segment is some other inline HTML — the caller
+// should treat it as ordinary inline raw HTML.
+func DecodeInlineFence(htmlSegment string) (string, bool) {
+	s := strings.TrimSpace(htmlSegment)
+	if !strings.HasPrefix(s, inlineFencePrefix) || !strings.HasSuffix(s, inlineFenceSuffix) {
+		return "", false
+	}
+	body := strings.TrimSpace(s[len(inlineFencePrefix) : len(s)-len(inlineFenceSuffix)])
+	decoded, err := base64.StdEncoding.DecodeString(body)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
+}
+
+// IsInlineFence reports whether s looks like an inline fence element.
+// A cheap classifier for callers that don't need to decode the body yet.
+func IsInlineFence(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, inlineFencePrefix) && strings.HasSuffix(s, inlineFenceSuffix)
+}

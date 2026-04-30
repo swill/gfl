@@ -55,6 +55,39 @@ func IsNotFound(err error) bool {
 	return ok && ae.StatusCode == http.StatusNotFound
 }
 
+// IsAttachmentUnchanged returns true when an UploadAttachment call failed
+// because the bytes posted are byte-identical to the latest version of the
+// attachment already on the page.
+//
+// Confluence Cloud's POST /content/{id}/child/attachment returns HTTP 400
+// with a message containing "same file name as an existing attachment" in
+// this case. (Different bytes for the same filename succeed and create a
+// new version; only an exact-byte re-upload is rejected.)
+//
+// Callers — chiefly the push path — treat this as a silent success: the
+// attachment is already up to date, so the page's <ri:attachment>
+// reference resolves correctly, and there is nothing to retry on a
+// subsequent push.
+func IsAttachmentUnchanged(err error) bool {
+	ae, ok := err.(*APIError)
+	if !ok || ae.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	// Match a few phrasings Confluence has used for this case so the
+	// detector is resilient to minor message tweaks across versions.
+	body := strings.ToLower(ae.Body)
+	for _, marker := range []string{
+		"same file name as an existing attachment",
+		"file with the same name already exists",
+		"attachment data has not changed",
+	} {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // do executes an HTTP request with auth headers set and returns the response.
 // The caller is responsible for closing the response body.
 func (c *Client) do(req *http.Request) (*http.Response, error) {

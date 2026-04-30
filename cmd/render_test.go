@@ -244,6 +244,108 @@ func TestPushResolvers_RecordsResolvedAttachments(t *testing.T) {
 	}
 }
 
+// treePageResolver is the cf_to_md (pull) direction's link resolver.
+// Like the attachment resolver, the path it emits must be relative to
+// the source .md file's directory so the link renders correctly in any
+// Markdown viewer.
+
+func newPullTreeForLinks(t *testing.T) (*tree.CfTree, *tree.PathMap) {
+	t.Helper()
+	root := &tree.CfNode{PageID: "1", Title: "Docs", SpaceKey: "DOCS"}
+	icp := &tree.CfNode{PageID: "10", Title: "Aptum ICP", SpaceKey: "DOCS", ParentPageID: "1"}
+	sample := &tree.CfNode{PageID: "20", Title: "Sample", SpaceKey: "DOCS", ParentPageID: "1"}
+	nested := &tree.CfNode{PageID: "30", Title: "Nested", SpaceKey: "DOCS", ParentPageID: "20"}
+	root.Children = []*tree.CfNode{icp, sample}
+	sample.Children = []*tree.CfNode{nested}
+	ct := tree.NewCfTree(root)
+	pm := tree.ComputePaths(ct, "docs/")
+	return ct, pm
+}
+
+func TestTreePageResolver_SiblingFromRootIndex(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	r := &treePageResolver{localPath: "docs/index.md", tree: ct, paths: pm}
+	got, ok := r.ResolvePageByID("10")
+	if !ok || got != "aptum-icp.md" {
+		t.Errorf("got (%q, %v), want (\"aptum-icp.md\", true)", got, ok)
+	}
+}
+
+func TestTreePageResolver_SiblingFromNestedPage(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	// Source: docs/sample/index.md (Sample has children, so it's a directory).
+	// Link to its child Nested → docs/sample/nested.md.
+	// Source dir is docs/sample, target is docs/sample/nested.md → "nested.md".
+	r := &treePageResolver{localPath: "docs/sample/index.md", tree: ct, paths: pm}
+	got, ok := r.ResolvePageByID("30")
+	if !ok || got != "nested.md" {
+		t.Errorf("got (%q, %v), want (\"nested.md\", true)", got, ok)
+	}
+}
+
+func TestTreePageResolver_ParentLinkUsesDoubleDot(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	// Source: docs/sample/nested.md, target: docs/aptum-icp.md
+	// → "../aptum-icp.md".
+	r := &treePageResolver{localPath: "docs/sample/nested.md", tree: ct, paths: pm}
+	got, ok := r.ResolvePageByID("10")
+	if !ok || got != "../aptum-icp.md" {
+		t.Errorf("got (%q, %v), want (\"../aptum-icp.md\", true)", got, ok)
+	}
+}
+
+func TestTreePageResolver_ResolveByTitleFallback(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	r := &treePageResolver{localPath: "docs/index.md", tree: ct, paths: pm}
+	got, ok := r.ResolvePageByTitle("Aptum ICP", "DOCS")
+	if !ok || got != "aptum-icp.md" {
+		t.Errorf("got (%q, %v), want (\"aptum-icp.md\", true)", got, ok)
+	}
+}
+
+func TestTreePageResolver_UnknownPage(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	r := &treePageResolver{localPath: "docs/index.md", tree: ct, paths: pm}
+	if _, ok := r.ResolvePageByID("9999"); ok {
+		t.Errorf("unknown page must not resolve")
+	}
+}
+
+// Round-trip: a path emitted by treePageResolver must be one that
+// pushPageResolver can resolve back to the same page id. Without this,
+// pull→edit→push would lose internal links on every cycle.
+func TestTreePageResolver_RoundTripsThroughPushResolver(t *testing.T) {
+	ct, pm := newPullTreeForLinks(t)
+	cases := []struct {
+		name      string
+		localPath string
+		linkID    string
+		wantTitle string
+	}{
+		{"root index → sibling", "docs/index.md", "10", "Aptum ICP"},
+		{"root index → directory", "docs/index.md", "20", "Sample"},
+		{"sample index → child", "docs/sample/index.md", "30", "Nested"},
+		{"nested → root sibling", "docs/sample/nested.md", "10", "Aptum ICP"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pull := &treePageResolver{localPath: c.localPath, tree: ct, paths: pm}
+			emitted, ok := pull.ResolvePageByID(c.linkID)
+			if !ok {
+				t.Fatalf("pull-side resolver missed %q", c.linkID)
+			}
+			push := &pushPageResolver{localPath: c.localPath, tree: ct, paths: pm}
+			gotTitle, _, ok := push.ResolveLink(emitted)
+			if !ok {
+				t.Fatalf("push-side resolver couldn't recover from %q", emitted)
+			}
+			if gotTitle != c.wantTitle {
+				t.Errorf("title round-trip lost: got %q, want %q (via path %q)", gotTitle, c.wantTitle, emitted)
+			}
+		})
+	}
+}
+
 // stubAttachmentResolver is the cf_to_md (pull) direction's resolver.
 // The path it emits is what users see embedded in their Markdown — it
 // must render correctly when viewed from the directory of the source .md

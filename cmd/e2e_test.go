@@ -90,6 +90,18 @@ func (r *e2eRepo) runPushInRepo() error {
 	return runPush(pushCmd, nil)
 }
 
+// runPushCapture is like runPushInRepo but returns the stderr output (where
+// gfl writes its progress lines). For tests that need to assert on which
+// log lines did or didn't appear.
+func (r *e2eRepo) runPushCapture() (string, error) {
+	r.cd()
+	var stderr bytes.Buffer
+	pushCmd.SetErr(&stderr)
+	pushCmd.SetOut(&bytes.Buffer{})
+	err := runPush(pushCmd, nil)
+	return stderr.String(), err
+}
+
 // readFile returns the contents of a repo-relative file as a string, failing
 // the test if the file is missing.
 func (r *e2eRepo) readFile(rel string) string {
@@ -658,6 +670,67 @@ func TestE2E_PushUpdateUploadsAttachment(t *testing.T) {
 
 	if string(r.mock.AttachmentsForPage(pageID)["img.png"]) != "image-v2-different" {
 		t.Errorf("v2 not uploaded; got: %q", r.mock.AttachmentsForPage(pageID)["img.png"])
+	}
+}
+
+// TestE2E_PushUnchangedAttachmentSilent is the regression for the "same
+// file name" warning: when a push edits the markdown body of a page that
+// references an attachment whose bytes haven't changed, Confluence
+// rejects the byte-identical re-upload with a 400. Pre-fix this surfaced
+// as `[gfl] WARNING: upload <file>: confluence API 400 Bad Request` on
+// every body-only edit. The handler now treats this as a silent no-op
+// and prints `[gfl] attach (unchanged): <path>` instead.
+func TestE2E_PushUnchangedAttachmentSilent(t *testing.T) {
+	r := newE2ERepo(t, [][4]string{
+		{"100", "", "Root", "<p>root</p>"},
+	})
+	if err := r.runPullInRepo(); err != nil {
+		t.Fatalf("seed pull: %v", err)
+	}
+
+	// Initial push with image and one body line.
+	imgBytes := []byte("identical-bytes")
+	r.writeBinary("docs/_attachments/page/img.png", imgBytes)
+	r.commit("docs/page.md",
+		"# Page\n\nFirst line.\n\n![alt](_attachments/page/img.png)\n",
+		"add page with image")
+	if _, err := r.runPushCapture(); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+
+	// Find the page; assert v1 was uploaded.
+	var pageID string
+	for id, p := range r.mock.AllPages() {
+		if p.Title == "Page" {
+			pageID = id
+			break
+		}
+	}
+	if pageID == "" {
+		t.Fatal("page not found")
+	}
+	if string(r.mock.AttachmentsForPage(pageID)["img.png"]) != "identical-bytes" {
+		t.Fatal("v1 not uploaded")
+	}
+
+	// Edit only the markdown body. Image bytes stay identical on disk.
+	cur := r.readFile("docs/page.md")
+	r.commit("docs/page.md",
+		strings.Replace(cur, "First line.", "First line. Edited.", 1),
+		"edit body only")
+
+	stderr, err := r.runPushCapture()
+	if err != nil {
+		t.Fatalf("second push: %v", err)
+	}
+
+	// Must NOT contain the upload-failure warning.
+	if strings.Contains(stderr, "WARNING: upload img.png") {
+		t.Errorf("BUG REGRESSION: surfaced 400 as a warning:\n%s", stderr)
+	}
+	// Must show the unchanged-attach status line so the user has feedback.
+	if !strings.Contains(stderr, "[gfl] attach (unchanged): docs/_attachments/page/img.png") {
+		t.Errorf("expected 'attach (unchanged)' status line, got:\n%s", stderr)
 	}
 }
 

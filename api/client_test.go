@@ -54,6 +54,46 @@ func TestIsNotFound(t *testing.T) {
 	}
 }
 
+func TestIsAttachmentUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"non-API error", errString("network down"), false},
+		{"404", &APIError{StatusCode: 404, Body: "not found"}, false},
+		{"500", &APIError{StatusCode: 500, Body: "boom"}, false},
+		{"400 unrelated", &APIError{StatusCode: 400, Body: "missing field"}, false},
+		{
+			"400 same-file-name (Cloud canonical)",
+			&APIError{StatusCode: 400, Body: `{"message":"Cannot add a new attachment with same file name as an existing attachment: foo.png"}`},
+			true,
+		},
+		{
+			"400 file-with-same-name",
+			&APIError{StatusCode: 400, Body: `{"message":"A file with the same name already exists"}`},
+			true,
+		},
+		{
+			"400 case-insensitive",
+			&APIError{StatusCode: 400, Body: `{"message":"SAME FILE NAME AS AN EXISTING ATTACHMENT"}`},
+			true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsAttachmentUnchanged(c.err); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 func TestDo_SetsAuthHeader(t *testing.T) {
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

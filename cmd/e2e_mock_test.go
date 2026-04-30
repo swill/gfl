@@ -271,17 +271,39 @@ func (m *mockConfluence) handleUploadAttachment(w http.ResponseWriter, r *http.R
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.attachments[pageID] == nil {
 		m.attachments[pageID] = make(map[string][]byte)
 	}
+	// Reproduce Confluence Cloud's behaviour: a byte-identical re-upload of
+	// an existing attachment returns 400 with a "same file name" message.
+	// (Different bytes for the same filename succeed and create a new
+	// version; only an exact-byte re-upload is rejected.)
+	if existing, ok := m.attachments[pageID][fh.Filename]; ok && bytesEqual(existing, data) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"Cannot add a new attachment with same file name as an existing attachment: ` + fh.Filename + `"}`))
+		return
+	}
 	m.attachments[pageID][fh.Filename] = data
-	m.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	// Real Confluence echoes back the attachment metadata — clients ignore
 	// it, but emit something well-formed anyway.
 	_, _ = w.Write([]byte(`{"results":[]}`))
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *mockConfluence) handleDownloadAttachment(w http.ResponseWriter, r *http.Request) {

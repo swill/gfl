@@ -379,11 +379,19 @@ func uploadResolvedAttachments(client *api.Client, root, pageID string, res *pus
 			fmt.Fprintf(out, "[gfl] WARNING: read attachment %s: %v\n", repoRelPath, err)
 			continue
 		}
-		if err := client.UploadAttachment(pageID, filename, data); err != nil {
+		err = client.UploadAttachment(pageID, filename, data)
+		switch {
+		case err == nil:
+			fmt.Fprintf(out, "[gfl] attach: %s → page %s\n", repoRelPath, pageID)
+		case api.IsAttachmentUnchanged(err):
+			// Confluence rejects a byte-identical re-upload with a 400.
+			// The attachment is already up to date; nothing to do, and
+			// nothing for the user to act on. Print at info level so the
+			// log still shows the file was checked.
+			fmt.Fprintf(out, "[gfl] attach (unchanged): %s\n", repoRelPath)
+		default:
 			fmt.Fprintf(out, "[gfl] WARNING: upload %s to page %s: %v\n", filename, pageID, err)
-			continue
 		}
-		fmt.Fprintf(out, "[gfl] attach: %s → page %s\n", repoRelPath, pageID)
 	}
 }
 

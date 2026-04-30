@@ -177,6 +177,47 @@ func TestCfToMd_AcLink_NoBody_FallsBackToTitle(t *testing.T) {
 	}
 }
 
+// TestCfToMd_AcLink_UserMention_InlineFenced is the regression test for
+// the bug where @mentions were silently dropped. A user mention's storage
+// shape is <ac:link><ri:user ri:account-id="..."/></ac:link> with no
+// plain-text-link-body. Pre-fix, that hit the "no ri:page → emit body
+// text" branch with empty body — the element vanished. The inline fence
+// preserves it so push restores the mention verbatim.
+func TestCfToMd_AcLink_UserMention_InlineFenced(t *testing.T) {
+	in := `<p>Hi <ac:link><ri:user ri:account-id="557058:abc-def-ghi"/></ac:link>, see this.</p>`
+	got := runCfToMd(t, in, CfToMdOpts{})
+	if !strings.Contains(got, `<gfl-fence data-v1-b64="`) {
+		t.Errorf("expected inline fence for @mention, got: %q", got)
+	}
+	// The mention must not have been dropped (output should retain
+	// content for both the surrounding text and the mention).
+	if !strings.Contains(got, "Hi ") || !strings.Contains(got, ", see this.") {
+		t.Errorf("surrounding text mangled: %q", got)
+	}
+	// Decoded payload contains the original ri:user element.
+	idx := strings.Index(got, "<gfl-fence")
+	end := strings.Index(got[idx:], "/>")
+	xml, ok := DecodeInlineFence(got[idx : idx+end+2])
+	if !ok {
+		t.Fatalf("could not decode inline fence: %q", got)
+	}
+	if !strings.Contains(xml, `ri:account-id="557058:abc-def-ghi"`) {
+		t.Errorf("account-id not preserved: %q", xml)
+	}
+}
+
+// TestCfToMd_AcLink_AttachmentLink_InlineFenced — an ac:link wrapping
+// ri:attachment is a download link to an attachment, distinct from the
+// ac:image attachment-embed shape we already handle. Markdown has no
+// equivalent, so fence-preserve.
+func TestCfToMd_AcLink_AttachmentLink_InlineFenced(t *testing.T) {
+	in := `<p>Get <ac:link><ri:attachment ri:filename="report.pdf"/><ac:plain-text-link-body><![CDATA[the report]]></ac:plain-text-link-body></ac:link>.</p>`
+	got := runCfToMd(t, in, CfToMdOpts{})
+	if !strings.Contains(got, `<gfl-fence data-v1-b64="`) {
+		t.Errorf("expected inline fence for attachment link, got: %q", got)
+	}
+}
+
 func TestCfToMd_Image_Attachment(t *testing.T) {
 	res := &stubResolver{
 		attachments: map[string]string{"diagram.png": "_attachments/architecture/diagram.png"},
@@ -309,6 +350,53 @@ func TestCfToMd_TocMacro_Omitted(t *testing.T) {
 	want := "Before.\n\nAfter."
 	if got := runCfToMd(t, in, CfToMdOpts{}); got != want {
 		t.Errorf("got:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+// TestCfToMd_Emoticon_InlineFenced is the regression test for the bug
+// where <ac:emoticon ac:name="heart"/> was being rendered as the literal
+// string ":heart:". Plain-text shortcodes are lossy: pushing the file
+// back to Confluence emits ":heart:" verbatim rather than restoring the
+// emoticon. The inline fence preserves the original element so the round
+// trip is faithful.
+func TestCfToMd_Emoticon_InlineFenced(t *testing.T) {
+	in := `<p>I love <ac:emoticon ac:name="heart"/> this.</p>`
+	got := runCfToMd(t, in, CfToMdOpts{})
+	if !strings.Contains(got, `<gfl-fence data-v1-b64="`) {
+		t.Errorf("expected inline fence, got: %q", got)
+	}
+	if strings.Contains(got, ":heart:") {
+		t.Errorf("plain-text shortcode leaked (lossy on push): %q", got)
+	}
+	// Decoded payload must be the original emoticon element.
+	idx := strings.Index(got, "<gfl-fence")
+	end := strings.Index(got[idx:], "/>")
+	xml, ok := DecodeInlineFence(got[idx : idx+end+2])
+	if !ok {
+		t.Fatalf("could not decode inline fence: %q", got)
+	}
+	if !strings.Contains(xml, `ac:name="heart"`) {
+		t.Errorf("decoded XML missing emoticon name: %q", xml)
+	}
+}
+
+// TestCfToMd_StatusMacro_InlineFenced is the regression test for the bug
+// where an inline <ac:structured-macro ac:name="status"> rendered as
+// "I AM A STATUSBlue" — the title and colour parameters concatenated by
+// the recurse-into-children default. Inline structured macros must
+// fence-preserve like any other unsupported inline construct.
+func TestCfToMd_StatusMacro_InlineFenced(t *testing.T) {
+	in := `<p>Build: <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">I AM A STATUS</ac:parameter><ac:parameter ac:name="colour">Blue</ac:parameter></ac:structured-macro> here.</p>`
+	got := runCfToMd(t, in, CfToMdOpts{})
+	if !strings.Contains(got, `<gfl-fence data-v1-b64="`) {
+		t.Errorf("expected inline fence, got: %q", got)
+	}
+	// The pre-fix concatenation must not appear.
+	if strings.Contains(got, "I AM A STATUSBlue") {
+		t.Errorf("BUG REGRESSION: parameter text concatenated into output: %q", got)
+	}
+	if strings.Contains(got, "I AM A STATUS") && !strings.Contains(got, "<gfl-fence") {
+		t.Errorf("status title leaked outside fence: %q", got)
 	}
 }
 

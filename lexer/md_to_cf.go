@@ -260,7 +260,13 @@ func (w *mdToCfWriter) writeFencedCode(n *ast.FencedCodeBlock) {
 	if l := n.Language(w.source); len(l) > 0 {
 		lang = strings.ToLower(string(l))
 	}
-	body := readLines(n, w.source)
+	// goldmark's Lines() includes the source's trailing newline on the last
+	// line of the code body. Confluence preserves the CDATA contents
+	// byte-for-byte, so leaving that newline in place adds a phantom blank
+	// line at the end of every code block on push. cf_to_md already strips
+	// trailing newlines on the way out (via TrimRight); we have to mirror
+	// that on the way in to keep the round trip clean.
+	body := strings.TrimRight(readLines(n, w.source), "\n")
 	w.sb.WriteString(`<ac:structured-macro ac:name="code">`)
 	if lang != "" {
 		fmt.Fprintf(&w.sb, `<ac:parameter ac:name="language">%s</ac:parameter>`, xmlEscape(lang))
@@ -272,7 +278,7 @@ func (w *mdToCfWriter) writeFencedCode(n *ast.FencedCodeBlock) {
 }
 
 func (w *mdToCfWriter) writeIndentedCode(n *ast.CodeBlock) {
-	body := readLines(n, w.source)
+	body := strings.TrimRight(readLines(n, w.source), "\n")
 	w.sb.WriteString(`<ac:structured-macro ac:name="code">`)
 	w.sb.WriteString(`<ac:plain-text-body>`)
 	w.sb.WriteString(wrapCDATA(body))
@@ -289,6 +295,16 @@ func (w *mdToCfWriter) writeHTMLBlock(n *ast.HTMLBlock) {
 	// storage XML back in verbatim — this is the whole point of the fence.
 	if xml, ok := DecodeBlockFence(raw); ok {
 		w.sb.WriteString(xml)
+		return
+	}
+	// An inline fence alone on its own line is parsed as an HTML block
+	// (CommonMark Type 7: a complete custom-element tag followed only by
+	// whitespace). Wrap the spliced XML in <p> since at block level the
+	// natural Confluence shape is a one-element paragraph.
+	if xml, ok := DecodeInlineFence(raw); ok {
+		w.sb.WriteString("<p>")
+		w.sb.WriteString(xml)
+		w.sb.WriteString("</p>")
 		return
 	}
 	// Plain HTML — Confluence storage doesn't tolerate arbitrary HTML (and
@@ -409,13 +425,26 @@ func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
 	case *ast.Image:
 		w.writeImage(node)
 	case *ast.RawHTML:
-		// Raw inline HTML is not legal in Confluence storage; escape it so the
-		// author sees the source literally rather than having it silently
-		// dropped by a Confluence sanitiser.
+		// Concatenate all segments first; an inline fence is one comment
+		// but goldmark may split a long line across multiple segments.
+		var raw strings.Builder
 		for i := 0; i < node.Segments.Len(); i++ {
 			seg := node.Segments.At(i)
-			w.sb.WriteString(xmlEscape(string(seg.Value(w.source))))
+			raw.Write(seg.Value(w.source))
 		}
+		rawStr := raw.String()
+		// Inline fence: splice the original storage XML back verbatim.
+		// This is the inline counterpart to the HTMLBlock fence path —
+		// preserves <ac:emoticon>, inline <ac:structured-macro>, and any
+		// other inline construct that has no Markdown shape.
+		if xml, ok := DecodeInlineFence(rawStr); ok {
+			w.sb.WriteString(xml)
+			break
+		}
+		// Plain inline HTML — Confluence storage doesn't tolerate it, so
+		// escape so the author sees the source literally rather than
+		// having it silently dropped by a Confluence sanitiser.
+		w.sb.WriteString(xmlEscape(rawStr))
 	case *extast.Strikethrough:
 		w.sb.WriteString("<s>")
 		w.writeInline(node)

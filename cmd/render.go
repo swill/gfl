@@ -99,7 +99,7 @@ func scanManagedFiles(repoRoot, localRoot string) ([]localManagedFile, error) {
 // it the URL would be silently dropped on conversion back to Markdown.
 func resolverForPage(localPath, baseURL string, cfg *cfgpkg.Config, ct *tree.CfTree, pm *tree.PathMap) lexer.CfToMdOpts {
 	return lexer.CfToMdOpts{
-		Pages: &treePageResolver{tree: ct, paths: pm},
+		Pages: &treePageResolver{localPath: localPath, tree: ct, paths: pm},
 		Attachments: &stubAttachmentResolver{
 			localPath:      localPath,
 			attachmentsDir: cfg.AttachmentsDir,
@@ -111,9 +111,16 @@ func resolverForPage(localPath, baseURL string, cfg *cfgpkg.Config, ct *tree.CfT
 
 // treePageResolver implements lexer.PageResolver against an in-memory CfTree.
 // Pull and init both use this; previously each had its own copy.
+//
+// The path emitted on a successful resolution is relative to the source .md
+// file's directory, not repo-rooted, so the resulting Markdown link
+// resolves correctly when the file is rendered from any viewer (GitHub,
+// IDE preview, CommonMark renderers all interpret link targets relative to
+// the file containing them).
 type treePageResolver struct {
-	tree  *tree.CfTree
-	paths *tree.PathMap
+	localPath string // source .md path, for computing relative link targets
+	tree      *tree.CfTree
+	paths     *tree.PathMap
 }
 
 // ResolvePageByID returns the local path for pageID iff that page is part of
@@ -124,7 +131,11 @@ func (r *treePageResolver) ResolvePageByID(pageID string) (string, bool) {
 	if !r.tree.Contains(pageID) {
 		return "", false
 	}
-	return r.paths.Path(pageID)
+	target, ok := r.paths.Path(pageID)
+	if !ok {
+		return "", false
+	}
+	return relPath(path.Dir(r.localPath), target), true
 }
 
 // ResolvePageByTitle is the legacy fallback used only when storage XML lacks
@@ -143,7 +154,11 @@ func (r *treePageResolver) ResolvePageByTitle(title, spaceKey string) (string, b
 	if found == nil {
 		return "", false
 	}
-	return r.paths.Path(found.PageID)
+	target, ok := r.paths.Path(found.PageID)
+	if !ok {
+		return "", false
+	}
+	return relPath(path.Dir(r.localPath), target), true
 }
 
 // pushAttachmentResolver implements lexer.MdAttachmentResolver for the

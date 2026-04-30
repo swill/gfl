@@ -601,11 +601,20 @@ func (r *cfRenderer) writeInline(sb *strings.Builder, n *cfNode) {
 	case "ac:image":
 		r.writeAcImage(sb, n)
 	case "ac:emoticon":
-		// Emoticons are decorative; drop. If shortname is present, fall back
-		// to it as plain text so the user can see what was there.
-		if name := n.attr("ac:name"); name != "" {
-			sb.WriteString(":" + name + ":")
-		}
+		// Confluence emoticons (heart, smile, tick, ...) have no Markdown
+		// equivalent. Preserve the original element via the inline fence so
+		// a push round-trip yields exactly the same emoticon Confluence
+		// rendered in the first place — rather than converting to a
+		// `:name:` shortcode that would push back as literal text.
+		sb.WriteString(EncodeInlineFence(serializeXML(n)))
+	case "ac:structured-macro":
+		// Inline structured macros (status, jira issue link, mention, etc.)
+		// have arbitrary parameter shapes. Preserving the original element
+		// verbatim is the only safe round-trip; falling through to the
+		// recurse-into-children default would concatenate parameter text
+		// into the surrounding paragraph (e.g. "[I AM A STATUS]" + "Blue"
+		// from a status macro's title and colour parameters).
+		sb.WriteString(EncodeInlineFence(serializeXML(n)))
 	default:
 		// Unknown inline element — recurse to keep child text intact.
 		r.writeInlineChildren(sb, n)
@@ -618,10 +627,31 @@ func (r *cfRenderer) writeInlineChildren(sb *strings.Builder, n *cfNode) {
 	}
 }
 
+// hasNonPageRiChild reports whether n contains any direct child element in
+// the `ri:` namespace other than ri:page. Used to detect ac:link variants
+// (user mentions, attachment links, space links, ...) that have no
+// Markdown shape and must be fence-preserved.
+func hasNonPageRiChild(n *cfNode) bool {
+	for _, c := range n.children {
+		if c.kind != cfElement {
+			continue
+		}
+		if strings.HasPrefix(c.name, "ri:") && c.name != "ri:page" {
+			return true
+		}
+	}
+	return false
+}
+
 // writeAcLink renders <ac:link><ri:page .../><ac:plain-text-link-body>...
 // Page references with a registered local path turn into Markdown links to
 // that path; unresolvable references render as plain text using the link body
 // (or, if absent, the referenced title).
+//
+// Non-page resource references (ri:user for @mentions, ri:attachment for
+// attachment download links, ri:space, ri:blog-post, ...) have no Markdown
+// equivalent. They are fence-preserved so push round-trips them back to
+// Confluence intact rather than silently dropping the element.
 func (r *cfRenderer) writeAcLink(sb *strings.Builder, n *cfNode) {
 	page := n.firstElement("ri:page")
 	body := n.firstElement("ac:plain-text-link-body")
@@ -633,7 +663,16 @@ func (r *cfRenderer) writeAcLink(sb *strings.Builder, n *cfNode) {
 	}
 
 	if page == nil {
-		// No page reference — emit the body as plain text.
+		// Non-page resource (ri:user, ri:attachment, ri:space, ...) — no
+		// Markdown shape exists. Fence-preserve so push restores it
+		// verbatim. Pre-fix, user mentions silently disappeared because
+		// they have no plain-text-link-body and no inner text.
+		if hasNonPageRiChild(n) {
+			sb.WriteString(EncodeInlineFence(serializeXML(n)))
+			return
+		}
+		// Pathological link with no resource at all — emit body text so
+		// nothing visible is lost.
 		if bodyText != "" {
 			sb.WriteString(escapeInlineText(bodyText))
 		}

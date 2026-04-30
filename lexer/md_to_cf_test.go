@@ -82,10 +82,45 @@ func TestMdToCf_InlineCode(t *testing.T) {
 
 func TestMdToCf_FencedCode_WithLang(t *testing.T) {
 	in := "```go\nfmt.Println(\"hi\")\n```\n"
-	want := `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">go</ac:parameter><ac:plain-text-body><![CDATA[fmt.Println("hi")
-]]></ac:plain-text-body></ac:structured-macro>`
+	// Trailing newline is stripped from the CDATA body — Confluence preserves
+	// CDATA byte-for-byte, so a stray "\n" surfaces as a blank line at the
+	// end of the rendered code block on each push.
+	want := `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">go</ac:parameter><ac:plain-text-body><![CDATA[fmt.Println("hi")]]></ac:plain-text-body></ac:structured-macro>`
 	if got := runMdToCf(t, in, MdToCfOpts{}); got != want {
 		t.Errorf("got:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+// TestMdToCf_FencedCode_PreservesInteriorNewlines confirms the trailing-
+// newline strip doesn't accidentally collapse multi-line code bodies into
+// one line — only the final source-newline after the last content line is
+// removed; newlines between lines stay intact.
+func TestMdToCf_FencedCode_PreservesInteriorNewlines(t *testing.T) {
+	in := "```\nline1\nline2\nline3\n```\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	if !strings.Contains(got, "<![CDATA[line1\nline2\nline3]]>") {
+		t.Errorf("interior newlines lost: %s", got)
+	}
+}
+
+// TestMdToCf_FencedCode_RoundTripNoTrailingNewline is the regression test
+// for the user-reported bug: a clean code block in Confluence pulled to
+// markdown without a trailing newline, but pushing it back added a stray
+// blank line at the end. The body in CDATA must match exactly what was
+// between the markdown fence delimiters, with no source-level newline tail.
+func TestMdToCf_FencedCode_RoundTripNoTrailingNewline(t *testing.T) {
+	// Clean Confluence code block: body has no trailing newline.
+	storageIn := `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">go</ac:parameter><ac:plain-text-body><![CDATA[fmt.Println("I made it", in)]]></ac:plain-text-body></ac:structured-macro>`
+	md, err := CfToMd(storageIn, CfToMdOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageOut, err := MdToCf(md, MdToCfOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storageOut != storageIn {
+		t.Errorf("round-trip mismatch:\n  in:  %q\n  out: %q", storageIn, storageOut)
 	}
 }
 

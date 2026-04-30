@@ -229,6 +229,29 @@ func TestRoundTrip_Storage_FixedPoint(t *testing.T) {
 		{"unknown-macro", `<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>`},
 		{"admonition-info", `<ac:structured-macro ac:name="info"><ac:rich-text-body><p>watch out</p></ac:rich-text-body></ac:structured-macro>`},
 		{"admonition-note", `<ac:structured-macro ac:name="note"><ac:rich-text-body><p>FYI</p></ac:rich-text-body></ac:structured-macro>`},
+		// Inline-fence-preserved constructs: emoticons and inline
+		// structured macros. Pre-fix these were lossy — emoticons became
+		// `:name:` shortcode plain text, inline structured macros had
+		// their parameter texts concatenated into the surrounding paragraph.
+		{"emoticon-inline", `<p>love <ac:emoticon ac:name="heart"/> it</p>`},
+		{"status-macro-inline", `<p>Build: <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">DONE</ac:parameter><ac:parameter ac:name="colour">Green</ac:parameter></ac:structured-macro> shipped.</p>`},
+		// Fence at paragraph start — the comment-form fence triggered
+		// CommonMark HTML block detection (Type 2 "<!-- ..."), which
+		// silently swallowed the rest of the line and any second fence.
+		// The custom-element fence avoids this.
+		{"status-macro-paragraph-start", `<p><ac:structured-macro ac:name="status" ac:macro-id="abc" ac:schema-version="1"><ac:parameter ac:name="title">I AM A STATUS</ac:parameter><ac:parameter ac:name="colour">Blue</ac:parameter></ac:structured-macro> at start.</p>`},
+		// Two fences in one paragraph — the user's exact reported failure.
+		{"two-status-macros-in-paragraph", `<p><ac:structured-macro ac:name="status" ac:macro-id="abc" ac:schema-version="1"><ac:parameter ac:name="title">First</ac:parameter></ac:structured-macro> and what about <ac:structured-macro ac:name="status" ac:macro-id="def" ac:schema-version="1"><ac:parameter ac:name="title">Second</ac:parameter></ac:structured-macro></p>`},
+		// Emoji-style emoticon with all the attributes Confluence really
+		// emits: fallback character, emoji-id, shortname, local-id, name.
+		{"emoji-emoticon-rich", `<p>I love <ac:emoticon ac:emoji-fallback="😍" ac:emoji-id="1f60d" ac:emoji-shortname=":heart_eyes:" ac:local-id="3998095f428c" ac:name="blue-star"/> seeing it.</p>`},
+		// User mentions — fence-preserved through the inline fence.
+		{"user-mention", `<p>Hi <ac:link><ri:user ri:account-id="557058:abc-def-ghi"/></ac:link>, ping me.</p>`},
+		// Mention at paragraph start — exercises the same line-start
+		// HTML-block-detection path the status macro hit earlier.
+		{"user-mention-paragraph-start", `<p><ac:link><ri:user ri:account-id="557058:abc"/></ac:link> please review.</p>`},
+		// Attachment download link (distinct from <ac:image> embeds).
+		{"attachment-download-link", `<p>See <ac:link><ri:attachment ri:filename="report.pdf"/><ac:plain-text-link-body><![CDATA[the report]]></ac:plain-text-link-body></ac:link>.</p>`},
 	}
 	res := newPaired()
 	opts := CfToMdOpts{Pages: res, Attachments: res}
