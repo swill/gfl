@@ -260,6 +260,55 @@ func TestRoundTrip_Storage_FixedPoint(t *testing.T) {
 		// edit to either prose paragraph would replace the panel with a
 		// generic <blockquote> on Confluence.
 		{"info-between-paragraphs", `<p>Above.</p><ac:structured-macro ac:name="info"><ac:rich-text-body><p>panel body</p></ac:rich-text-body></ac:structured-macro><p>Below.</p>`},
+		// Image with Confluence-side styling — the meta sidecar
+		// preserves ac:width and friends across the round trip.
+		{"image-with-styling", `<p><ac:image ac:alt="diagram" ac:layout="center" ac:width="1006"><ri:attachment ri:filename="diagram.png"/></ac:image></p>`},
+		// External link with target="_blank" — the most common HTML
+		// attribute we want to survive.
+		{"link-with-target-blank", `<p>See <a href="https://example.com" rel="noopener" target="_blank">example</a>.</p>`},
+		// ADF-extension note panel (Atlassian Cloud's newer storage
+		// shape). Pulls down as `> [!NOTE]\n> body`; pushes back as the
+		// classic <ac:structured-macro ac:name="note"> form. Both shapes
+		// converge on the same markdown, so the round trip is byte-stable
+		// even though Confluence may oscillate between the two storage
+		// forms across saves.
+		{"adf-note-panel", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-content><p>Note Panel content</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+		// Admonition with parameters (icon, custom colour) — preserved
+		// via the meta sidecar. Body stays editable.
+		{"info-with-icon-param", `<ac:structured-macro ac:name="info"><ac:parameter ac:name="icon">true</ac:parameter><ac:rich-text-body><p>watch out</p></ac:rich-text-body></ac:structured-macro>`},
+		{"warning-with-bgcolor-param", `<ac:structured-macro ac:name="warning"><ac:parameter ac:name="bgColor">#ffeb3b</ac:parameter><ac:rich-text-body><p>danger</p></ac:rich-text-body></ac:structured-macro>`},
+		// Confluence expand macro — title and body round-trip.
+		{"expand-with-title", `<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">Click to reveal</ac:parameter><ac:rich-text-body><p>hidden content</p></ac:rich-text-body></ac:structured-macro>`},
+		// Expand with both title parameter and data-layout attribute —
+		// the latter survives via the data-* meta key convention.
+		{"expand-with-data-layout", `<ac:structured-macro ac:name="expand" data-layout="wide"><ac:parameter ac:name="breakoutWidth">1800</ac:parameter><ac:parameter ac:name="title">Hi</ac:parameter><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`},
+		// ADF decision-list with a single DECIDED item — the default
+		// state stays implicit on the markdown side.
+		{"decision-decided", `<ac:adf-extension><ac:adf-node type="decision-list"><ac:adf-node type="decision-item"><ac:adf-attribute key="state">DECIDED</ac:adf-attribute><ac:adf-content>ship it</ac:adf-content></ac:adf-node></ac:adf-node></ac:adf-extension>`},
+		// Decision with a non-default state — travels via meta sidecar.
+		{"decision-undecided", `<ac:adf-extension><ac:adf-node type="decision-list"><ac:adf-node type="decision-item"><ac:adf-attribute key="state">UNDECIDED</ac:adf-attribute><ac:adf-content>still thinking</ac:adf-content></ac:adf-node></ac:adf-node></ac:adf-extension>`},
+		// Confluence's generic themable Panel macro — preserves icon
+		// and colour parameters via the meta sidecar across pull/push.
+		{"panel-with-icon-and-color", `<ac:structured-macro ac:name="panel"><ac:parameter ac:name="bgColor">#E3FCEF</ac:parameter><ac:parameter ac:name="panelIcon">:nauseated_face:</ac:parameter><ac:parameter ac:name="panelIconId">1f922</ac:parameter><ac:parameter ac:name="panelIconText">🤢</ac:parameter><ac:rich-text-body><p>custom panel content</p></ac:rich-text-body></ac:structured-macro>`},
+
+		// All six built-in Confluence panel types as the user sees them
+		// in the editor. Confluence's storage names are LEGACY: ac:name=
+		// "tip" is today's "success" panel (green), ac:name="note" is
+		// "warning" (yellow), ac:name="warning" is "error" (red). The
+		// markdown side uses the UI-aligned names.
+		{"ui-info-panel-classic", `<ac:structured-macro ac:name="info"><ac:rich-text-body><p>info</p></ac:rich-text-body></ac:structured-macro>`},
+		{"ui-success-panel-classic", `<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>success</p></ac:rich-text-body></ac:structured-macro>`},
+		{"ui-warning-panel-classic", `<ac:structured-macro ac:name="note"><ac:rich-text-body><p>warning</p></ac:rich-text-body></ac:structured-macro>`},
+		{"ui-error-panel-classic", `<ac:structured-macro ac:name="warning"><ac:rich-text-body><p>error</p></ac:rich-text-body></ac:structured-macro>`},
+		// note (purple) only exists as ADF — no classic equivalent.
+		{"ui-note-panel-adf", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-content><p>note</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+		// ADF success / warning / error panels — Confluence may emit
+		// either classic or ADF for these depending on the editor. Both
+		// must converge on the same markdown so the visual style stays
+		// consistent across re-saves.
+		{"ui-success-panel-adf", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">success</ac:adf-attribute><ac:adf-content><p>success</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+		{"ui-warning-panel-adf", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">warning</ac:adf-attribute><ac:adf-content><p>warning</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+		{"ui-error-panel-adf", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">error</ac:adf-attribute><ac:adf-content><p>error</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
 	}
 	res := newPaired()
 	opts := CfToMdOpts{Pages: res, Attachments: res}

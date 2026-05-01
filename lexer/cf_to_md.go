@@ -296,12 +296,177 @@ func (r *cfRenderer) renderBlock(n *cfNode) string {
 		var sb strings.Builder
 		r.writeAcImage(&sb, n)
 		return sb.String()
+	case "ac:adf-extension":
+		// Atlassian Cloud's newer ADF (Atlassian Document Format) wrapping.
+		// Some constructs (panels, decisions, ...) migrated from the
+		// classic <ac:structured-macro> shape to this extension form;
+		// pages can mix both depending on when each construct was
+		// authored. We translate the panel variant into the same GFM
+		// admonition output the classic info/note/warning/tip macros
+		// produce, so the user sees one consistent markdown shape
+		// regardless of which storage form Confluence chose.
+		if label, body, ok := adfPanelToAdmonition(n); ok {
+			return renderGFMAdmonitionFromBlocks(label, body, nil, r.opts)
+		}
+		// Decision lists are also stored as ADF extensions. Each item
+		// becomes its own [!DECISION] admonition so the body content
+		// stays editable; the state (DECIDED / UNDECIDED) round-trips
+		// via the meta sidecar.
+		if items, ok := adfDecisionListToItems(n); ok {
+			return renderDecisionItems(items, r.opts)
+		}
+		// Other ADF nodes (custom panels with explicit colours, future
+		// node types) fence-preserve.
+		return EncodeBlockFence(serializeXML(n))
 	default:
 		// Anything else block-level — including unknown HTML elements that
 		// don't fit the supported set — gets fence-preserved so the round trip
 		// keeps it intact.
 		return EncodeBlockFence(serializeXML(n))
 	}
+}
+
+// adfPanelToAdmonition recognises the modern Atlassian ADF panel shape:
+//
+//	<ac:adf-extension>
+//	  <ac:adf-node type="panel">
+//	    <ac:adf-attribute key="panel-type">note</ac:adf-attribute>
+//	    <ac:adf-content>...body blocks...</ac:adf-content>
+//	  </ac:adf-node>
+//	  <ac:adf-fallback>...</ac:adf-fallback>  (ignored)
+//	</ac:adf-extension>
+//
+// On a successful match, returns the admonition label (info/note/
+// warning/tip) and the body's child block nodes. Returns ok=false for
+// non-panel ADF extensions, panels with custom colours, or panel-types
+// outside the small set we can losslessly map to a GFM admonition.
+func adfPanelToAdmonition(ext *cfNode) (label string, body []*cfNode, ok bool) {
+	node := ext.firstElement("ac:adf-node")
+	if node == nil || node.attr("type") != "panel" {
+		return "", nil, false
+	}
+	var panelType string
+	for _, c := range node.children {
+		if c.kind == cfElement && c.name == "ac:adf-attribute" && c.attr("key") == "panel-type" {
+			panelType = strings.TrimSpace(c.innerText())
+			break
+		}
+	}
+	label = adfPanelTypeToLabel(panelType)
+	if label == "" {
+		return "", nil, false
+	}
+	if c := node.firstElement("ac:adf-content"); c != nil {
+		body = c.children
+	}
+	return label, body, true
+}
+
+// classicMacroLabel maps a classic <ac:structured-macro ac:name="..."> to
+// the user-facing markdown admonition label. Confluence's storage names
+// are LEGACY: the editor was redesigned to call panels info/note/
+// success/warning/error in the UI, but the storage XML kept the
+// original four names — and they don't line up. `ac:name="note"` is
+// today's yellow *warning* panel; `ac:name="warning"` is today's red
+// *error* panel; `ac:name="tip"` is today's green *success* panel. The
+// UI never had a classic macro for the purple *note* panel — that one
+// only exists as ADF.
+//
+// We use UI-aligned labels on the markdown side so authors writing
+// `[!WARNING]` get the yellow warning panel they see in Confluence
+// (not the red error one).
+var classicMacroLabel = map[string]string{
+	"info":    "info",
+	"tip":     "success", // green
+	"note":    "warning", // yellow
+	"warning": "error",   // red
+	"panel":   "panel",
+	"expand":  "expand",
+}
+
+// adfPanelTypeToLabel maps an ADF panel-type to the user-facing markdown
+// admonition label. ADF's naming is sane (it matches the UI), so the
+// mapping is a straight pass-through for all five well-known types.
+// Unmapped types ("custom" with explicit colours, anything new) return
+// "" so the caller fence-preserves.
+func adfPanelTypeToLabel(panelType string) string {
+	switch panelType {
+	case "info":
+		return "info"
+	case "note":
+		return "note" // purple — only available via ADF
+	case "success":
+		return "success"
+	case "warning":
+		return "warning"
+	case "error":
+		return "error"
+	}
+	return ""
+}
+
+// decisionItem is one entry in an ADF decision-list — a single row in
+// Confluence's "Decisions" feature. Each item carries its own state
+// (DECIDED, UNDECIDED) and inline content.
+type decisionItem struct {
+	state   string
+	content []*cfNode
+}
+
+// adfDecisionListToItems extracts the decision items from an
+// <ac:adf-extension> wrapping <ac:adf-node type="decision-list">.
+// Returns ok=false for any other ADF extension.
+func adfDecisionListToItems(ext *cfNode) ([]decisionItem, bool) {
+	list := ext.firstElement("ac:adf-node")
+	if list == nil || list.attr("type") != "decision-list" {
+		return nil, false
+	}
+	var items []decisionItem
+	for _, c := range list.children {
+		if c.kind != cfElement || c.name != "ac:adf-node" || c.attr("type") != "decision-item" {
+			continue
+		}
+		var item decisionItem
+		for _, cc := range c.children {
+			if cc.kind != cfElement {
+				continue
+			}
+			switch cc.name {
+			case "ac:adf-attribute":
+				if cc.attr("key") == "state" {
+					item.state = strings.TrimSpace(cc.innerText())
+				}
+			case "ac:adf-content":
+				item.content = cc.children
+			}
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return nil, false
+	}
+	return items, true
+}
+
+// renderDecisionItems emits one [!DECISION] admonition per decision
+// item. The state travels via the meta sidecar (omitted when DECIDED,
+// the default).
+//
+// A single Confluence decision-list with N items becomes N adjacent
+// blockquotes in markdown. On push, each becomes its own
+// <ac:adf-extension>; Confluence's editor may re-merge them into a
+// single list on the next save. The visual rendering matches in either
+// shape.
+func renderDecisionItems(items []decisionItem, opts CfToMdOpts) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		var meta map[string]string
+		if item.state != "" && item.state != "DECIDED" {
+			meta = map[string]string{"state": item.state}
+		}
+		parts = append(parts, renderGFMAdmonitionFromBlocks("decision", item.content, meta, opts))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // renderMacro handles known ac:structured-macro variants. Unknown macros fall
@@ -318,16 +483,138 @@ func (r *cfRenderer) renderMacro(n *cfNode) string {
 	case "toc":
 		// Per CLAUDE.md mapping: TOC macro is omitted entirely.
 		return ""
+	case "info", "note", "warning", "tip", "panel":
+		// Render as a GitHub-flavoured admonition. Any <ac:parameter>
+		// children (icon, bgColor, panelIcon, panelIconId,
+		// panelIconText, ...) round-trip via the meta sidecar after the
+		// marker. A complex parameter (one whose value is nested
+		// elements rather than simple text) can't be encoded in the
+		// flat sidecar — fall back to fence preservation so the
+		// parameter doesn't get truncated.
+		//
+		// "panel" is Confluence's generic themable panel macro,
+		// rendered as `[!PANEL]`. Authors get the same editable body
+		// as info/note/warning/tip, with whatever colour / icon /
+		// border parameters Confluence emitted preserved verbatim.
+		if meta, ok := extractMacroMeta(n); ok {
+			return renderGFMAdmonitionFromMacro(n, meta, r.opts)
+		}
+	case "expand":
+		// Confluence's expand macro is a labelled body with a title:
+		// the same shape as an admonition. Render as `[!EXPAND]` with
+		// the title and other parameters in the meta sidecar so the
+		// body stays editable in markdown.
+		if meta, ok := extractMacroMeta(n); ok {
+			return renderGFMAdmonitionFromMacro(n, meta, r.opts)
+		}
 	}
-	// Admonitions (info, note, warning, tip) and every other structured
-	// macro fall through to fence preservation. An earlier rendering of
-	// admonitions as `> **Info:** ...` blockquotes was lossy on push:
-	// goldmark parses that as <blockquote><p><strong>Info:</strong>...
-	// which md_to_cf restores as <blockquote>, REPLACING the original
-	// macro on Confluence. The first body-only edit after a pull would
-	// silently destroy the panel. The fence keeps the original storage
-	// XML intact across an arbitrary number of edit cycles.
+	// Anything else — admonition with complex parameters, status, jira,
+	// view-file, layout, ... — fence-preserve so the original element
+	// round-trips byte-for-byte.
 	return EncodeBlockFence(serializeXML(n))
+}
+
+// extractMacroMeta collects round-trippable metadata from a structured
+// macro: every <ac:parameter ac:name="X">value</ac:parameter> child as
+// a key/value pair, plus any data-* XML attributes on the macro element
+// itself (Confluence emits things like data-layout="wide" on expand).
+//
+// Returns ok=false when any parameter has structured (non-text-only)
+// content that can't be represented in the flat key/value sidecar — the
+// caller should fence-preserve in that case so the parameter isn't
+// silently truncated. Auto-generated attributes (ac:macro-id,
+// ac:local-id, ac:schema-version) are deliberately dropped — Confluence
+// regenerates them on every save, so preserving them only adds churn.
+func extractMacroMeta(n *cfNode) (map[string]string, bool) {
+	out := make(map[string]string)
+
+	// data-* XML attributes on the macro element. Other namespaced
+	// attributes (ac:name, ac:macro-id, ac:schema-version, ac:local-id)
+	// are either the macro identity itself or auto-generated, so we
+	// skip them.
+	for k, v := range n.attrs {
+		if strings.HasPrefix(k, "data-") {
+			out[k] = v
+		}
+	}
+
+	// <ac:parameter> children — text-only values only.
+	for _, c := range n.children {
+		if c.kind != cfElement || c.name != "ac:parameter" {
+			continue
+		}
+		name := c.attr("ac:name")
+		if name == "" {
+			return nil, false
+		}
+		for _, cc := range c.children {
+			if cc.kind == cfElement {
+				return nil, false
+			}
+		}
+		out[name] = strings.TrimSpace(c.innerText())
+	}
+
+	return out, true
+}
+
+// renderGFMAdmonitionFromMacro is the shared rendering path for classic
+// <ac:structured-macro> admonitions and expand macros. The label is
+// translated via classicMacroLabel so the markdown side uses UI-aligned
+// names rather than Confluence's legacy storage names.
+func renderGFMAdmonitionFromMacro(n *cfNode, meta map[string]string, opts CfToMdOpts) string {
+	var body []*cfNode
+	if b := n.firstElement("ac:rich-text-body"); b != nil {
+		body = b.children
+	}
+	storageName := n.attr("ac:name")
+	label := classicMacroLabel[storageName]
+	if label == "" {
+		// Defensive fallback: if a future macro name slips through the
+		// renderMacro switch, use the storage name verbatim rather than
+		// returning an empty marker.
+		label = storageName
+	}
+	return renderGFMAdmonitionFromBlocks(label, body, meta, opts)
+}
+
+// renderGFMAdmonitionFromBlocks builds the GFM admonition output given
+// an already-known label, a slice of body block nodes, and an optional
+// meta sidecar. The meta is encoded as a `<!--gfl:meta key="..."-->`
+// comment immediately after the marker; on push, md_to_cf decodes it
+// back into <ac:parameter> children (and data-* XML attributes).
+//
+// This helper is the convergence point for every storage shape that
+// produces a GFM admonition: classic <ac:structured-macro> info/note/
+// warning/tip, classic expand, modern ADF-extension panels, and ADF
+// decision-list items all flow through here.
+func renderGFMAdmonitionFromBlocks(label string, body []*cfNode, meta map[string]string, opts CfToMdOpts) string {
+	upper := strings.ToUpper(label)
+	metaStr := EncodeMeta(meta)
+	bodyStr := ""
+	if len(body) > 0 {
+		var inner cfRenderer
+		inner.opts = opts
+		inner.renderBlocks(body)
+		bodyStr = strings.TrimRight(inner.sb.String(), "\n")
+	}
+	if bodyStr == "" {
+		return "> [!" + upper + "]" + metaStr
+	}
+	var sb strings.Builder
+	sb.WriteString("> [!" + upper + "]")
+	sb.WriteString(metaStr)
+	sb.WriteByte('\n')
+	for _, line := range strings.Split(bodyStr, "\n") {
+		if line == "" {
+			sb.WriteString(">\n")
+		} else {
+			sb.WriteString("> ")
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // renderTaskList renders a Confluence task macro as a GFM checkbox list. Each
@@ -582,6 +869,10 @@ func (r *cfRenderer) writeInline(sb *strings.Builder, n *cfNode) {
 			return
 		}
 		fmt.Fprintf(sb, "[%s](%s)", text, href)
+		// Preserve any additional <a> attributes (target="_blank",
+		// rel="noopener", class, ...) via the inline metadata sidecar so
+		// they survive the round trip.
+		sb.WriteString(EncodeMeta(extractLinkMeta(n)))
 	case "ac:link":
 		r.writeAcLink(sb, n)
 	case "ac:image":
@@ -765,6 +1056,9 @@ func urlQueryEscape(s string) string {
 // writeAcImage renders <ac:image> wrapping either <ri:attachment ri:filename>
 // or <ri:url ri:value>. For attachments, the Markdown alt text defaults to the
 // leaf filename without extension if none is provided in the source.
+//
+// Any non-trivial Confluence attributes (ac:width, ac:layout, ac:align, ...)
+// are preserved via the inline metadata sidecar so they round-trip.
 func (r *cfRenderer) writeAcImage(sb *strings.Builder, n *cfNode) {
 	alt := n.attr("ac:alt")
 	if att := n.firstElement("ri:attachment"); att != nil {
@@ -779,13 +1073,49 @@ func (r *cfRenderer) writeAcImage(sb *strings.Builder, n *cfNode) {
 			alt = stripExt(filename)
 		}
 		fmt.Fprintf(sb, "![%s](%s)", alt, src)
+		sb.WriteString(EncodeMeta(extractImageMeta(n)))
 		return
 	}
 	if u := n.firstElement("ri:url"); u != nil {
 		src := u.attr("ri:value")
 		fmt.Fprintf(sb, "![%s](%s)", alt, src)
+		sb.WriteString(EncodeMeta(extractImageMeta(n)))
 		return
 	}
+}
+
+// extractImageMeta returns the round-trippable attributes of an
+// <ac:image> element — every attribute except ones already represented
+// in the markdown (ac:alt) or generated by Confluence on save (macro-id,
+// local-id).
+func extractImageMeta(n *cfNode) map[string]string {
+	skip := map[string]bool{
+		"ac:alt":      true, // already encoded as the markdown alt text
+		"ac:macro-id": true, // regenerated by Confluence
+		"ac:local-id": true, // regenerated by Confluence
+	}
+	out := make(map[string]string, len(n.attrs))
+	for k, v := range n.attrs {
+		if skip[k] {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// extractLinkMeta returns the round-trippable attributes of an external
+// <a> element — every attribute except href (already encoded as the
+// markdown link target).
+func extractLinkMeta(n *cfNode) map[string]string {
+	out := make(map[string]string, len(n.attrs))
+	for k, v := range n.attrs {
+		if k == "href" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func stripExt(filename string) string {

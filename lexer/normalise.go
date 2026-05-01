@@ -248,6 +248,9 @@ func (r *mdRenderer) renderIndentedCodeAsFence(n *ast.CodeBlock) string {
 }
 
 func (r *mdRenderer) renderBlockquote(n *ast.Blockquote) string {
+	if label, bodyStart, meta, ok := admonitionFromBlockquote(n, r.source); ok {
+		return r.renderAdmonition(label, bodyStart, n, meta)
+	}
 	var parts []string
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		parts = append(parts, r.renderBlock(c))
@@ -264,6 +267,73 @@ func (r *mdRenderer) renderBlockquote(n *ast.Blockquote) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderAdmonition emits a blockquote that's been recognised as a GFM
+// admonition in the canonical form:
+//
+//	> [!LABEL]<optional gfl:meta sidecar>
+//	> body line
+//	> body line
+//
+// Without this special case, the default blockquote renderer emits a
+// hard-break backslash between the marker line and the body content
+// (because goldmark parses both as one paragraph with a soft line break,
+// and the standard inline writer turns soft breaks into "\\\n"). The
+// canonical form lets pull→edit→push round-trip cleanly through Normalise
+// without churning the marker shape.
+func (r *mdRenderer) renderAdmonition(label string, firstParaBodyStart ast.Node, bq *ast.Blockquote, meta map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("> [!")
+	sb.WriteString(strings.ToUpper(label))
+	sb.WriteByte(']')
+	sb.WriteString(EncodeMeta(meta))
+
+	var bodyParts []string
+
+	// Inline content following the marker on subsequent lines forms the
+	// first body paragraph. The default writer emits soft breaks as
+	// "\\\n" — fine for ordinary paragraphs, but inside an admonition
+	// body it produces a stair-step of escaped backslashes. Replace them
+	// with natural newlines so the body reads as plain blockquote prose.
+	if firstParaBodyStart != nil {
+		var inlineSb strings.Builder
+		for c := firstParaBodyStart; c != nil; c = c.NextSibling() {
+			r.writeInlineNode(&inlineSb, c)
+		}
+		body := strings.ReplaceAll(strings.TrimRight(inlineSb.String(), "\n"), "\\\n", "\n")
+		if body != "" {
+			bodyParts = append(bodyParts, body)
+		}
+	}
+
+	// Subsequent block children of the blockquote (extra paragraphs,
+	// lists, code, ...) render normally.
+	para := bq.FirstChild()
+	for c := para.NextSibling(); c != nil; c = c.NextSibling() {
+		if rendered := r.renderBlock(c); rendered != "" {
+			bodyParts = append(bodyParts, rendered)
+		}
+	}
+
+	if len(bodyParts) == 0 {
+		return sb.String()
+	}
+
+	body := strings.Join(bodyParts, "\n\n")
+	sb.WriteByte('\n')
+	for i, line := range strings.Split(body, "\n") {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		if line == "" {
+			sb.WriteByte('>')
+		} else {
+			sb.WriteString("> ")
+			sb.WriteString(line)
+		}
+	}
+	return sb.String()
 }
 
 func (r *mdRenderer) renderHTMLBlock(n *ast.HTMLBlock) string {
@@ -353,73 +423,81 @@ func (r *mdRenderer) renderInline(n ast.Node) string {
 
 func (r *mdRenderer) writeInline(sb *strings.Builder, parent ast.Node) {
 	for c := parent.FirstChild(); c != nil; c = c.NextSibling() {
-		switch node := c.(type) {
-		case *ast.Text:
-			seg := node.Segment
-			sb.Write(seg.Value(r.source))
-			if node.HardLineBreak() || node.SoftLineBreak() {
-				sb.WriteString("\\\n")
-			}
-		case *ast.String:
-			sb.Write(node.Value)
-		case *ast.Emphasis:
-			delim := "*"
-			if node.Level == 2 {
-				delim = "**"
-			}
-			sb.WriteString(delim)
-			r.writeInline(sb, node)
-			sb.WriteString(delim)
-		case *ast.CodeSpan:
-			// Inline code content is the concatenation of child text nodes.
-			sb.WriteByte('`')
-			r.writeInline(sb, node)
-			sb.WriteByte('`')
-		case *ast.Link:
-			sb.WriteByte('[')
-			r.writeInline(sb, node)
-			sb.WriteString("](")
-			sb.Write(node.Destination)
-			if len(node.Title) > 0 {
-				sb.WriteString(` "`)
-				sb.Write(node.Title)
-				sb.WriteByte('"')
-			}
-			sb.WriteByte(')')
-		case *ast.AutoLink:
-			sb.WriteByte('<')
-			sb.Write(node.URL(r.source))
-			sb.WriteByte('>')
-		case *ast.Image:
-			sb.WriteString("![")
-			r.writeInline(sb, node)
-			sb.WriteString("](")
-			sb.Write(node.Destination)
-			if len(node.Title) > 0 {
-				sb.WriteString(` "`)
-				sb.Write(node.Title)
-				sb.WriteByte('"')
-			}
-			sb.WriteByte(')')
-		case *ast.RawHTML:
-			for i := 0; i < node.Segments.Len(); i++ {
-				seg := node.Segments.At(i)
-				sb.Write(seg.Value(r.source))
-			}
-		case *extast.Strikethrough:
-			sb.WriteString("~~")
-			r.writeInline(sb, node)
-			sb.WriteString("~~")
-		case *extast.TaskCheckBox:
-			if node.IsChecked {
-				sb.WriteString("[x] ")
-			} else {
-				sb.WriteString("[ ] ")
-			}
-		default:
-			// Unknown inline node — recurse to keep any child text.
-			r.writeInline(sb, node)
+		r.writeInlineNode(sb, c)
+	}
+}
+
+// writeInlineNode emits a single inline AST node. Extracted from
+// writeInline so the admonition renderer (and any future caller that
+// needs to iterate from a non-first sibling) can emit a partial inline
+// run without rebuilding a parent.
+func (r *mdRenderer) writeInlineNode(sb *strings.Builder, c ast.Node) {
+	switch node := c.(type) {
+	case *ast.Text:
+		seg := node.Segment
+		sb.Write(seg.Value(r.source))
+		if node.HardLineBreak() || node.SoftLineBreak() {
+			sb.WriteString("\\\n")
 		}
+	case *ast.String:
+		sb.Write(node.Value)
+	case *ast.Emphasis:
+		delim := "*"
+		if node.Level == 2 {
+			delim = "**"
+		}
+		sb.WriteString(delim)
+		r.writeInline(sb, node)
+		sb.WriteString(delim)
+	case *ast.CodeSpan:
+		// Inline code content is the concatenation of child text nodes.
+		sb.WriteByte('`')
+		r.writeInline(sb, node)
+		sb.WriteByte('`')
+	case *ast.Link:
+		sb.WriteByte('[')
+		r.writeInline(sb, node)
+		sb.WriteString("](")
+		sb.Write(node.Destination)
+		if len(node.Title) > 0 {
+			sb.WriteString(` "`)
+			sb.Write(node.Title)
+			sb.WriteByte('"')
+		}
+		sb.WriteByte(')')
+	case *ast.AutoLink:
+		sb.WriteByte('<')
+		sb.Write(node.URL(r.source))
+		sb.WriteByte('>')
+	case *ast.Image:
+		sb.WriteString("![")
+		r.writeInline(sb, node)
+		sb.WriteString("](")
+		sb.Write(node.Destination)
+		if len(node.Title) > 0 {
+			sb.WriteString(` "`)
+			sb.Write(node.Title)
+			sb.WriteByte('"')
+		}
+		sb.WriteByte(')')
+	case *ast.RawHTML:
+		for i := 0; i < node.Segments.Len(); i++ {
+			seg := node.Segments.At(i)
+			sb.Write(seg.Value(r.source))
+		}
+	case *extast.Strikethrough:
+		sb.WriteString("~~")
+		r.writeInline(sb, node)
+		sb.WriteString("~~")
+	case *extast.TaskCheckBox:
+		if node.IsChecked {
+			sb.WriteString("[x] ")
+		} else {
+			sb.WriteString("[ ] ")
+		}
+	default:
+		// Unknown inline node — recurse to keep any child text.
+		r.writeInline(sb, node)
 	}
 }
 

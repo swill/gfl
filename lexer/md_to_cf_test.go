@@ -206,6 +206,66 @@ func TestMdToCf_Autolink(t *testing.T) {
 	}
 }
 
+// TestMdToCf_Image_WithMetaSidecar — a meta comment immediately after an
+// image is consumed and its key/value pairs are emitted as additional
+// attributes on the <ac:image> element. This is what makes Confluence-
+// side image sizing/layout survive the markdown round trip.
+func TestMdToCf_Image_WithMetaSidecar(t *testing.T) {
+	r := &stubMdResolver{
+		images: map[string]string{
+			"_attachments/x.png": "x.png",
+		},
+	}
+	in := `![alt](_attachments/x.png)<!--gfl:meta ac:width="1006" ac:layout="center"-->` + "\n"
+	got := runMdToCf(t, in, MdToCfOpts{Attachments: r})
+	want := `<p><ac:image ac:alt="alt" ac:layout="center" ac:width="1006"><ri:attachment ri:filename="x.png"/></ac:image></p>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMdToCf_Link_WithMetaSidecar(t *testing.T) {
+	in := `[example](https://example.com)<!--gfl:meta target="_blank" rel="noopener"-->` + "\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<p><a href="https://example.com" rel="noopener" target="_blank">example</a></p>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Meta_StrayDropped — a meta comment NOT immediately
+// adjacent to a supported construct is dropped silently rather than
+// surfaced as escaped HTML on the Confluence side.
+func TestMdToCf_Meta_StrayDropped(t *testing.T) {
+	in := `Some text <!--gfl:meta target="_blank"--> more text` + "\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	if strings.Contains(got, "&lt;") || strings.Contains(got, "gfl:meta") {
+		t.Errorf("stray meta leaked into storage: %q", got)
+	}
+	if !strings.Contains(got, "Some text") || !strings.Contains(got, "more text") {
+		t.Errorf("surrounding text lost: %q", got)
+	}
+}
+
+// TestMdToCf_Meta_NotConsumedByAcLink — page-resolved <ac:link>s don't
+// take HTML attributes; an adjacent meta comment is silently dropped on
+// that path (no <ac:link target="_blank">).
+func TestMdToCf_Meta_NotConsumedByAcLink(t *testing.T) {
+	r := &stubMdResolver{
+		links: map[string]stubLink{
+			"page.md": {title: "Page"},
+		},
+	}
+	in := `[page](page.md)<!--gfl:meta target="_blank"-->` + "\n"
+	got := runMdToCf(t, in, MdToCfOpts{Pages: r})
+	if !strings.Contains(got, `<ac:link>`) {
+		t.Errorf("expected <ac:link>, got: %s", got)
+	}
+	if strings.Contains(got, "target") {
+		t.Errorf("target leaked into ac:link path: %s", got)
+	}
+}
+
 func TestMdToCf_Image_Attachment(t *testing.T) {
 	r := &stubMdResolver{
 		images: map[string]string{
@@ -294,6 +354,205 @@ func TestMdToCf_Blockquote(t *testing.T) {
 	want := "<blockquote><p>quoted text</p></blockquote>"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Admonition_GFM verifies that a GitHub-style admonition the
+// user authored on the markdown side becomes a real Confluence info
+// macro on push. Pre-fix it was just a <blockquote>.
+func TestMdToCf_Admonition_GFM(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// info — straight pass-through.
+		{"info", "> [!INFO]\n> careful here\n", `<ac:structured-macro ac:name="info"><ac:rich-text-body><p>careful here</p></ac:rich-text-body></ac:structured-macro>`},
+		// note — purple panel; only ADF has a shape for it.
+		{"note", "> [!NOTE]\n> remember\n", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-content><p>remember</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+		// success → ac:name="tip" (the green panel's legacy storage name).
+		{"success", "> [!SUCCESS]\n> shipped\n", `<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>shipped</p></ac:rich-text-body></ac:structured-macro>`},
+		// warning → ac:name="note" (the yellow panel's legacy storage name).
+		{"warning", "> [!WARNING]\n> danger\n", `<ac:structured-macro ac:name="note"><ac:rich-text-body><p>danger</p></ac:rich-text-body></ac:structured-macro>`},
+		// error → ac:name="warning" (the red panel's legacy storage name).
+		{"error", "> [!ERROR]\n> bad\n", `<ac:structured-macro ac:name="warning"><ac:rich-text-body><p>bad</p></ac:rich-text-body></ac:structured-macro>`},
+		// tip is a back-compat alias for success.
+		{"tip-alias", "> [!TIP]\n> handy\n", `<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>handy</p></ac:rich-text-body></ac:structured-macro>`},
+		// caution is a GH-spec alias for error.
+		{"caution-alias", "> [!CAUTION]\n> danger\n", `<ac:structured-macro ac:name="warning"><ac:rich-text-body><p>danger</p></ac:rich-text-body></ac:structured-macro>`},
+		// important is a GH-spec alias for note (purple).
+		{"important-alias", "> [!IMPORTANT]\n> heads up\n", `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-content><p>heads up</p></ac:adf-content></ac:adf-node></ac:adf-extension>`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := runMdToCf(t, c.in, MdToCfOpts{}); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMdToCf_Admonition_LowercaseLabel(t *testing.T) {
+	// Permissive on input case — user might write `[!info]` instead of
+	// `[!INFO]`.
+	in := "> [!info]\n> body\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="info"><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMdToCf_Admonition_EmptyBody(t *testing.T) {
+	in := "> [!INFO]\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="info"><ac:rich-text-body></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMdToCf_Admonition_MultiParagraph(t *testing.T) {
+	// `[!NOTE]` (purple) emits ADF; multi-paragraph body lives inside
+	// <ac:adf-content>.
+	in := "> [!NOTE]\n> first\n>\n> second\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-content><p>first</p><p>second</p></ac:adf-content></ac:adf-node></ac:adf-extension>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Admonition_MultiParagraph_ClassicMacro covers the same
+// multi-paragraph case for one of the labels that does emit a classic
+// structured-macro (warning → ac:name="note").
+func TestMdToCf_Admonition_MultiParagraph_ClassicMacro(t *testing.T) {
+	in := "> [!WARNING]\n> first\n>\n> second\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="note"><ac:rich-text-body><p>first</p><p>second</p></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Admonition_UnknownLabel — `[!CUSTOM]` isn't one of the
+// recognised admonition labels, so the blockquote stays a plain
+// <blockquote> rather than being mis-routed to a non-existent macro.
+func TestMdToCf_Admonition_UnknownLabel(t *testing.T) {
+	in := "> [!CUSTOM]\n> body\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	if strings.Contains(got, `ac:structured-macro`) {
+		t.Errorf("unknown label became a macro: %s", got)
+	}
+	if !strings.Contains(got, "<blockquote>") {
+		t.Errorf("expected plain blockquote, got: %s", got)
+	}
+}
+
+// TestMdToCf_Admonition_WithMetaSidecar — a meta sidecar after the
+// marker becomes <ac:parameter> children on the emitted macro.
+func TestMdToCf_Admonition_WithMetaSidecar(t *testing.T) {
+	in := `> [!INFO]<!--gfl:meta icon="true" bgColor="#ffeb3b"-->` + "\n> body\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="info"><ac:parameter ac:name="bgColor">#ffeb3b</ac:parameter><ac:parameter ac:name="icon">true</ac:parameter><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Admonition_NoteSidecar_OnAdfPath — `[!NOTE]` emits ADF;
+// any meta sidecar attributes travel as additional <ac:adf-attribute>
+// children on the panel node.
+func TestMdToCf_Admonition_NoteSidecar_OnAdfPath(t *testing.T) {
+	in := `> [!NOTE]<!--gfl:meta panelIcon=":heart:"-->` + "\n> body\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">note</ac:adf-attribute><ac:adf-attribute key="panelIcon">:heart:</ac:adf-attribute><ac:adf-content><p>body</p></ac:adf-content></ac:adf-node></ac:adf-extension>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMdToCf_Admonition_DataAttributeSplitsOut(t *testing.T) {
+	// data-* meta keys become XML attributes on the macro element, not
+	// <ac:parameter> children — that's the wire shape Confluence uses
+	// (e.g. data-layout="wide" on expand).
+	in := `> [!EXPAND]<!--gfl:meta data-layout="wide" title="Hi"-->` + "\n> body\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="expand" data-layout="wide"><ac:parameter ac:name="title">Hi</ac:parameter><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Panel_GFM — `[!PANEL]` becomes Confluence's generic
+// themable panel macro on push, with all sidecar attributes preserved
+// as <ac:parameter> children.
+func TestMdToCf_Panel_GFM(t *testing.T) {
+	in := `> [!PANEL]<!--gfl:meta bgColor="#E3FCEF" panelIcon=":nauseated_face:" panelIconId="1f922" panelIconText="🤢"-->` + "\n> custom panel content\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="panel">` +
+		`<ac:parameter ac:name="bgColor">#E3FCEF</ac:parameter>` +
+		`<ac:parameter ac:name="panelIcon">:nauseated_face:</ac:parameter>` +
+		`<ac:parameter ac:name="panelIconId">1f922</ac:parameter>` +
+		`<ac:parameter ac:name="panelIconText">🤢</ac:parameter>` +
+		`<ac:rich-text-body><p>custom panel content</p></ac:rich-text-body>` +
+		`</ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Expand_GFM — `[!EXPAND]` becomes a Confluence expand
+// macro on push, mirroring the info/note/warning/tip family.
+func TestMdToCf_Expand_GFM(t *testing.T) {
+	in := "> [!EXPAND]\n> hidden content\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:structured-macro ac:name="expand"><ac:rich-text-body><p>hidden content</p></ac:rich-text-body></ac:structured-macro>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMdToCf_Decision_GFM — `[!DECISION]` becomes an
+// <ac:adf-extension><ac:adf-node type="decision-list"> with one
+// decision-item. State defaults to DECIDED.
+func TestMdToCf_Decision_GFM(t *testing.T) {
+	in := "> [!DECISION]\n> ship it\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	want := `<ac:adf-extension><ac:adf-node type="decision-list"><ac:adf-node type="decision-item"><ac:adf-attribute key="state">DECIDED</ac:adf-attribute><ac:adf-content>ship it</ac:adf-content></ac:adf-node></ac:adf-node></ac:adf-extension>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMdToCf_Decision_WithStateMeta(t *testing.T) {
+	in := `> [!DECISION]<!--gfl:meta state="UNDECIDED"-->` + "\n> still thinking\n"
+	got := runMdToCf(t, in, MdToCfOpts{})
+	if !strings.Contains(got, `<ac:adf-attribute key="state">UNDECIDED</ac:adf-attribute>`) {
+		t.Errorf("UNDECIDED state not preserved: %s", got)
+	}
+	if !strings.Contains(got, `<ac:adf-content>still thinking</ac:adf-content>`) {
+		t.Errorf("decision body not preserved: %s", got)
+	}
+}
+
+// TestMdToCf_Blockquote_NotAdmonition — a regular blockquote whose
+// content happens to start with similar-looking text must NOT become a
+// macro. (e.g. a blockquote that begins with "[" and ends with "]" but
+// not in the marker shape.)
+func TestMdToCf_Blockquote_NotAdmonition(t *testing.T) {
+	cases := []string{
+		"> just a blockquote\n",
+		"> [link text](https://example.com)\n",       // a markdown link
+		"> [!INFO without closing bracket\n",         // malformed marker
+		"> text [!INFO] content\n",                   // marker not at start
+	}
+	for _, c := range cases {
+		got := runMdToCf(t, c, MdToCfOpts{})
+		if strings.Contains(got, `ac:structured-macro ac:name="info"`) ||
+			strings.Contains(got, `ac:structured-macro ac:name="note"`) {
+			t.Errorf("non-admonition input became a macro: input=%q output=%q", c, got)
+		}
 	}
 }
 

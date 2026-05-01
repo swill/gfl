@@ -1,8 +1,8 @@
-# gfl
+# gitfluence (`gfl`)
 
 Project Naming: "Git + Confluence" -> "gitfluence" -> `gfl`
 
-Deterministic, bidirectional synchronization between Markdown files in a Git repository and pages in an Atlassian Confluence instance.
+Deterministic, bidirectional synchronization between Markdown files in a Git repository and pages in an Atlassian Confluence space.
 
 `gfl` operates entirely through Git hooks and the Confluence REST API. It mirrors a Confluence space's hierarchy as a directory tree of Markdown files, and uses Git's native branch and merge machinery to reconcile changes from both sides.
 
@@ -12,20 +12,22 @@ Highlights:
 
 - **Bidirectional**, driven by Git events — commits trigger pull, pushes trigger push.
 - **Page identity travels with the file**. Renames, moves, and copies preserve the link to the Confluence page automatically.
-- **Tree-aware**. Confluence's hierarchy mirrors a directory tree; pages with children become directories with `index.md`.
+- **Tree-aware**. Confluence's hierarchy mirrors a directory tree; pages with children become directories with `index.md` as the root page.
 - **Deterministic conversion**. Purpose-built Go lexers; round-trips are byte-stable for every supported construct.
-- **Unsupported constructs preserved verbatim** via a base64-encoded HTML-comment fence — Confluence macros, panels, mentions, etc. survive round-trips intact.
+- **Confluence panels stay editable**. Info / Note / Success / Warning / Error / Custom panels, plus expand sections and decision items, render as GitHub-style admonitions (`> [!INFO]\n> body`) — you edit the body as plain markdown and the macro round-trips back to Confluence intact. Panel parameters (icons, custom colours, expand titles, image sizing, link `target="_blank"`) survive via an inline `<!--gfl:meta-->` sidecar.
+- **Unrepresentable constructs preserved verbatim**. Status badges, jira issue links, user mentions, layouts, decisions, custom panel parameters — anything without a clean Markdown shape is fence-preserved (base64-encoded storage XML) so push round-trips them untouched.
+- **Attachments sync both ways**. Pull downloads referenced binaries; push uploads any image referenced from the markdown that lives under `_attachments/`. Confluence's "no-change" rejection is silenced.
 - **Conflicts are git conflicts**. Resolve them with your editor and `git merge --continue`.
 - **Self-recovering on partial push failure**. Operations that fail simply re-appear in the next push's diff.
 - **No external dependencies** beyond Git and the binary itself — no CI, no Pandoc, no LLMs.
 
 ## Installation
 
-`gfl` is installed per-developer, not bundled with consuming repositories. Each developer puts the binary on their `PATH`.
+`gfl` is installed per-developer, not bundled with consuming repositories. Each git user puts the binary in their `PATH`.
 
 ### From release binaries
 
-Pre-compiled binaries are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Download the appropriate archive, extract, and place `gfl` somewhere on your `PATH` (e.g. `/usr/local/bin`).
+[Pre-compiled binaries](https://github.com/swill/gfl/releases) are published as GitHub release artifacts for `linux/amd64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. Download the appropriate archive, extract, and place `gfl` somewhere on your `PATH` (e.g. `/usr/local/bin`).
 
 Verify the install:
 
@@ -45,10 +47,10 @@ This drops the binary in `$(go env GOPATH)/bin`. Make sure that directory is on 
 
 ## Getting started: a new repository
 
-Use `gfl init` to initialise a Git repository from an existing Confluence page tree.
+Use `gfl init` to initialize a Git repository from an existing Confluence page tree.
 
 ```sh
-cd your-repo
+cd your-git-repo
 
 # Create .env with Confluence credentials
 cat > .env <<'EOF'
@@ -123,7 +125,35 @@ Conventions:
 - Pages with children become directories containing `index.md`; leaf pages are flat `.md` files.
 - Filenames are deterministically slugified from page titles.
 - Attachments live under `_attachments/` mirroring the page hierarchy.
-- Front-matter is canonicalised on every pull (sorted keys, double-quoted strings) so byte-stable round-trips are preserved.
+- Front-matter is canonicalized on every pull (sorted keys, double-quoted strings) so byte-stable round-trips are preserved.
+
+### Editable Confluence constructs
+
+Beyond plain text, lists, headings, and code blocks, several common Confluence constructs come down as editable Markdown — the body stays plain markdown, and the wrapper round-trips back to Confluence on push. The labels are aligned with what the editor shows in Confluence today, NOT with the legacy storage names (which are misnamed for historical reasons):
+
+| Confluence panel  | Markdown                                                  |
+|-------------------|-----------------------------------------------------------|
+| Info (blue)       | `> [!INFO]`                                               |
+| Note (purple)     | `> [!NOTE]`                                               |
+| Success (green)   | `> [!SUCCESS]`                                            |
+| Warning (yellow)  | `> [!WARNING]`                                            |
+| Error (red)       | `> [!ERROR]`                                              |
+| Custom panel      | `> [!PANEL]<!--gfl:meta bgColor="#..." panelIcon="..."-->`|
+| Expand            | `> [!EXPAND]<!--gfl:meta title="..."-->`                  |
+| Decision item     | `> [!DECISION]` (one per item)                            |
+
+`[!TIP]`, `[!IMPORTANT]`, and `[!CAUTION]` are accepted on push as aliases for `[!SUCCESS]`, `[!NOTE]`, and `[!ERROR]` respectively (matching GitHub's admonition spec).
+
+Image sizing/layout, link `target`/`rel`, panel icons and colours, expand titles, and similar attributes that have no native Markdown shape travel via an inline metadata sidecar:
+
+```markdown
+![diagram](_attachments/foo/diagram.png)<!--gfl:meta ac:width="1006" ac:layout="center"-->
+[example](https://example.com)<!--gfl:meta target="_blank" rel="noopener"-->
+> [!INFO]<!--gfl:meta icon="true"-->
+> body
+```
+
+The sidecar is a plain HTML comment — invisible in rendered Markdown but editable as text.
 
 ### Configuration files
 
@@ -153,14 +183,14 @@ Environment variables of the same names take precedence over `.env`.
 When joining a repository someone else has already run `gfl init` on:
 
 ```sh
-git clone <repo>
-cd <repo>
+git clone <git-repo>
+cd <git-repo>
 
 # Set up credentials
 cp .env.example .env
 # Edit .env with your Confluence credentials
 
-# Install Git hooks (assumes `gfl` is on your PATH)
+# Install Git hooks (assumes `gfl` is in your PATH)
 gfl install
 ```
 
@@ -176,18 +206,20 @@ The pull hooks are guarded by `GFL_HOOK_ACTIVE` so the commit that pull itself c
 
 ### Daily commands
 
-| Command       | What it does                                                                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gfl status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt.                                                 |
-| `gfl pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts.                       |
+| Command       | What it does |
+| ------------- | ------------ |
+| `gfl status`  | Show files that differ between the working branch and `confluence` — exactly what `push` would attempt. |
+| `gfl pull`    | Sync Confluence into the `confluence` branch and merge it into the working branch. Conflicts surface as standard merge conflicts. |
 | `gfl push`    | Diff against the `confluence` branch and write changes to Confluence; commit a sync chore on the working branch and fast-forward `confluence` to match. |
-| `gfl version` | Print version, commit, and build date.                                                                                                                  |
+| `gfl version` | Print version, commit, and build date. |
 
-You usually don't run `pull` or `push` directly — Git hooks handle them. Use `status` to see what's pending; use the explicit commands when troubleshooting.
+You usually don't run `pull` or `push` directly — Git hooks handle them. Use `status` to see what's pending; use the explicit commands when troubleshooting.  If you know there are changes in Confluence you want to pull in, then you can run `gfl pull` to get them so you can build from there locally.
+
+> **NOTE:** When running `git push`, it is possible that Confluence pages will be updated.  In order for your local git repository to have the latest Confluence page versions, `gfl` will pull down the latest version numbers and commit them into the tree.  This means that it can leave your git repo one commit behind the remote.  A second `git push` will update your upstream repo with the latest Confluence page versions commit.
 
 ### How sync works
 
-The local branch `confluence` is the canonical "last-known Confluence state" — every file there carries `confluence_page_id` and `confluence_version` in front-matter. It's machine-managed; don't commit to it directly.
+The local branch `confluence` is the canonical "last-known Confluence state" — every file there carries `confluence_page_id` and `confluence_version` in front-matter. *It's machine-managed; don't commit to it directly.*
 
 **Pull** (post-commit / post-merge / post-rewrite):
 
@@ -199,13 +231,14 @@ The local branch `confluence` is the canonical "last-known Confluence state" —
 **Push** (pre-push):
 
 1. Diffs the working branch against `confluence` with rename detection.
-2. For each changed `.md`: creates, updates (with 409 retry), deletes, or renames the corresponding Confluence page (renames apply the Title Stability Rule to avoid capitalisation drift).
-3. Round-trips each pushed body through `CfToMd` so its committed form matches what a future pull would produce.
-4. Commits `chore(sync): confluence-push @ <ts>` on the working branch and fast-forwards `confluence` to that commit. After a successful push, `confluence` and the working branch tip are byte-equal.
+2. For each changed `.md`: creates, updates (with 409 retry), deletes, or renames the corresponding Confluence page (renames apply the Title Stability Rule to avoid capitalization drift).
+3. Uploads any attachments the markdown references under `_attachments/`. Byte-identical re-uploads (Confluence's HTTP 400 "same file name" response) are treated as success.
+4. Round-trips each pushed body through `CfToMd` so its committed form matches what a future pull would produce.
+5. Commits `chore(sync): confluence-push @ <ts>` on the working branch and fast-forwards `confluence` to that commit. After a successful push, `confluence` and the working branch tip are byte-equal.
 
 Failed operations don't queue — they re-appear in the next push's diff and are retried then.
 
-## Developing gfl
+## Developing `gfl`
 
 This section is for working on `gfl` itself, not for using it.
 

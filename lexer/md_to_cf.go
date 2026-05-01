@@ -2,6 +2,7 @@ package lexer
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/yuin/goldmark/ast"
@@ -117,6 +118,10 @@ func (w *mdToCfWriter) writeBlock(n ast.Node) {
 	case *ast.CodeBlock:
 		w.writeIndentedCode(node)
 	case *ast.Blockquote:
+		if label, bodyStart, meta, ok := admonitionFromBlockquote(node, w.source); ok {
+			w.writeAdmonition(label, bodyStart, node, meta)
+			return
+		}
 		w.sb.WriteString("<blockquote>")
 		w.writeBlocks(node)
 		w.sb.WriteString("</blockquote>")
@@ -374,9 +379,58 @@ func tableAlignToCSS(a extast.Alignment) string {
 // --- Inline -----------------------------------------------------------------
 
 func (w *mdToCfWriter) writeInline(parent ast.Node) {
+	var skipNext ast.Node
 	for c := parent.FirstChild(); c != nil; c = c.NextSibling() {
+		if c == skipNext {
+			// Already consumed as a metadata sidecar of the previous node.
+			skipNext = nil
+			continue
+		}
+		// Peek for a gfl:meta sidecar immediately after this node and,
+		// if it decorates a construct that supports metadata (image,
+		// external link), apply it and arrange to skip the meta node on
+		// the next iteration.
+		if meta, metaNode := readAdjacentMeta(c, w.source); meta != nil {
+			switch node := c.(type) {
+			case *ast.Image:
+				w.writeImage(node, meta)
+				skipNext = metaNode
+				continue
+			case *ast.Link:
+				w.writeLink(node, meta)
+				skipNext = metaNode
+				continue
+			}
+			// c isn't a meta-supporting construct — fall through and
+			// emit normally; the meta will be handled by writeInlineNode's
+			// stray-meta path below.
+		}
 		w.writeInlineNode(c)
 	}
+}
+
+// readAdjacentMeta inspects c.NextSibling() and, if it's a gfl:meta
+// inline raw HTML comment, returns the decoded attributes and the node
+// itself (so the caller can mark it for skipping). Returns (nil, nil)
+// when there's no adjacent metadata.
+func readAdjacentMeta(c ast.Node, source []byte) (map[string]string, ast.Node) {
+	if c == nil {
+		return nil, nil
+	}
+	next, ok := c.NextSibling().(*ast.RawHTML)
+	if !ok || next == nil {
+		return nil, nil
+	}
+	var raw strings.Builder
+	for i := 0; i < next.Segments.Len(); i++ {
+		seg := next.Segments.At(i)
+		raw.Write(seg.Value(source))
+	}
+	meta, ok := DecodeMeta(raw.String())
+	if !ok {
+		return nil, nil
+	}
+	return meta, next
 }
 
 func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
@@ -418,12 +472,12 @@ func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
 		w.sb.WriteString(xmlEscape(buf.String()))
 		w.sb.WriteString("</code>")
 	case *ast.Link:
-		w.writeLink(node)
+		w.writeLink(node, nil)
 	case *ast.AutoLink:
 		url := string(node.URL(w.source))
 		fmt.Fprintf(&w.sb, `<a href="%s">%s</a>`, xmlAttrEscape(url), xmlEscape(url))
 	case *ast.Image:
-		w.writeImage(node)
+		w.writeImage(node, nil)
 	case *ast.RawHTML:
 		// Concatenate all segments first; an inline fence is one comment
 		// but goldmark may split a long line across multiple segments.
@@ -439,6 +493,14 @@ func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
 		// other inline construct that has no Markdown shape.
 		if xml, ok := DecodeInlineFence(rawStr); ok {
 			w.sb.WriteString(xml)
+			break
+		}
+		// Stray gfl:meta comment — was not consumed by an adjacent
+		// construct (probably because the user moved or deleted it, or
+		// inserted whitespace between it and the construct). Drop
+		// silently so it doesn't surface as escaped HTML on the
+		// Confluence side.
+		if IsMeta(rawStr) {
 			break
 		}
 		// Plain inline HTML — Confluence storage doesn't tolerate it, so
@@ -464,11 +526,14 @@ func (w *mdToCfWriter) writeInlineNode(n ast.Node) {
 	}
 }
 
-func (w *mdToCfWriter) writeLink(n *ast.Link) {
+func (w *mdToCfWriter) writeLink(n *ast.Link, meta map[string]string) {
 	dest := string(n.Destination)
 	// Is this a reference to another page in the sync tree?
 	if w.opts.Pages != nil {
 		if title, space, ok := w.opts.Pages.ResolveLink(dest); ok {
+			// ac:link is a Confluence-internal page reference. Arbitrary
+			// HTML attributes (target, rel, ...) don't apply, so any
+			// adjacent meta is silently dropped here.
 			w.sb.WriteString("<ac:link>")
 			if space != "" {
 				fmt.Fprintf(&w.sb, `<ri:page ri:content-title="%s" ri:space-key="%s"/>`,
@@ -483,8 +548,11 @@ func (w *mdToCfWriter) writeLink(n *ast.Link) {
 			return
 		}
 	}
-	// External link — standard <a href>.
-	fmt.Fprintf(&w.sb, `<a href="%s">`, xmlAttrEscape(dest))
+	// External link — standard <a href> with any sidecar meta applied
+	// as additional attributes (target, rel, class, ...).
+	fmt.Fprintf(&w.sb, `<a href="%s"`, xmlAttrEscape(dest))
+	w.writeMetaAttrs(meta)
+	w.sb.WriteByte('>')
 	w.writeInline(n)
 	w.sb.WriteString("</a>")
 }
@@ -515,7 +583,7 @@ func linkInlineText(n *ast.Link, source []byte) string {
 	return sb.String()
 }
 
-func (w *mdToCfWriter) writeImage(n *ast.Image) {
+func (w *mdToCfWriter) writeImage(n *ast.Image, meta map[string]string) {
 	dest := string(n.Destination)
 	alt := imageAltText(n, w.source)
 
@@ -525,6 +593,7 @@ func (w *mdToCfWriter) writeImage(n *ast.Image) {
 			if alt != "" {
 				fmt.Fprintf(&w.sb, ` ac:alt="%s"`, xmlAttrEscape(alt))
 			}
+			w.writeMetaAttrs(meta)
 			w.sb.WriteByte('>')
 			fmt.Fprintf(&w.sb, `<ri:attachment ri:filename="%s"/>`, xmlAttrEscape(filename))
 			w.sb.WriteString("</ac:image>")
@@ -536,9 +605,27 @@ func (w *mdToCfWriter) writeImage(n *ast.Image) {
 	if alt != "" {
 		fmt.Fprintf(&w.sb, ` ac:alt="%s"`, xmlAttrEscape(alt))
 	}
+	w.writeMetaAttrs(meta)
 	w.sb.WriteByte('>')
 	fmt.Fprintf(&w.sb, `<ri:url ri:value="%s"/>`, xmlAttrEscape(dest))
 	w.sb.WriteString("</ac:image>")
+}
+
+// writeMetaAttrs applies a meta-sidecar map as additional XML attributes
+// on the currently-open element. Keys are emitted in sorted order for
+// deterministic output. A nil/empty map writes nothing.
+func (w *mdToCfWriter) writeMetaAttrs(meta map[string]string) {
+	if len(meta) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&w.sb, ` %s="%s"`, k, xmlAttrEscape(meta[k]))
+	}
 }
 
 // imageAltText collects the plain-text alt attribute from an image node's
@@ -562,6 +649,285 @@ func imageAltText(n *ast.Image, source []byte) string {
 	}
 	walk(n)
 	return sb.String()
+}
+
+// --- Admonition detection (GFM) --------------------------------------------
+
+// admonitionFromBlockquote inspects a Blockquote AST and reports whether it
+// matches the GitHub-flavoured admonition shape:
+//
+//	> [!INFO]
+//	> body
+//
+//	> [!INFO]<!--gfl:meta icon="true"-->
+//	> body
+//
+// On a match, label is the lowercase macro name (info/note/warning/tip/
+// expand/decision), bodyStart is the first inline child of the first
+// paragraph that follows the marker (and any sidecar) — or nil when no
+// inline content follows — and meta is the decoded sidecar attributes
+// (nil if there is no sidecar).
+//
+// Only the canonical "marker on its own line" form is recognised — the
+// form GitHub officially documents and that goldmark splits cleanly into
+// three Text tokens (`[`, `!LABEL`, `]`) with the closing bracket
+// carrying the soft line break. The optional gfl:meta sidecar must sit
+// on the same line, immediately after `]`, with no intervening
+// whitespace.
+func admonitionFromBlockquote(bq *ast.Blockquote, source []byte) (label string, bodyStart ast.Node, meta map[string]string, ok bool) {
+	first, isPara := bq.FirstChild().(*ast.Paragraph)
+	if !isPara || first == nil {
+		return "", nil, nil, false
+	}
+	t1, ok := first.FirstChild().(*ast.Text)
+	if !ok || string(t1.Segment.Value(source)) != "[" {
+		return "", nil, nil, false
+	}
+	t2, ok := t1.NextSibling().(*ast.Text)
+	if !ok {
+		return "", nil, nil, false
+	}
+	middle := string(t2.Segment.Value(source))
+	if len(middle) < 2 || middle[0] != '!' {
+		return "", nil, nil, false
+	}
+
+	// Goldmark splits the marker tokens differently depending on what
+	// follows the closing bracket on the same line:
+	//
+	//   `> [!INFO]\n> body`            → three tokens: [, !INFO, ]
+	//   `> [!INFO]<!--gfl:meta-->...`  → two tokens:   [, !INFO]
+	//
+	// In the merged-bracket case, the closing `]` is the last byte of t2.
+	// Accept both shapes.
+	var labelText string
+	var lastMarker ast.Node
+	if strings.HasSuffix(middle, "]") {
+		// Two-token form: !LABEL] merged.
+		labelText = middle[1 : len(middle)-1]
+		lastMarker = t2
+	} else {
+		// Three-token form: separate ] follows.
+		t3, ok := t2.NextSibling().(*ast.Text)
+		if !ok || string(t3.Segment.Value(source)) != "]" {
+			return "", nil, nil, false
+		}
+		labelText = middle[1:]
+		lastMarker = t3
+	}
+	label = strings.ToLower(labelText)
+	switch label {
+	case
+		// UI-aligned canonical labels (cf_to_md emits these on pull).
+		"info", "note", "success", "warning", "error", "panel",
+		// Other supported constructs.
+		"expand", "decision",
+		// Backward-compat / GH-spec aliases — accepted on push but
+		// never emitted on pull. Resolved to the canonical equivalent
+		// by labelToStorage when emitting.
+		"tip", "important", "caution":
+		// supported
+	default:
+		return "", nil, nil, false
+	}
+
+	afterMarker := lastMarker.NextSibling()
+
+	// Optional gfl:meta sidecar immediately after `]`.
+	if rh, isRaw := afterMarker.(*ast.RawHTML); isRaw {
+		var raw strings.Builder
+		for i := 0; i < rh.Segments.Len(); i++ {
+			seg := rh.Segments.At(i)
+			raw.Write(seg.Value(source))
+		}
+		if m, mok := DecodeMeta(raw.String()); mok {
+			meta = m
+			afterMarker = rh.NextSibling()
+		}
+	}
+
+	// In the meta-sidecar case the soft line break between the marker
+	// line and the body content shows up as an empty Text node (or one
+	// that consists entirely of whitespace) carrying SoftLineBreak=true
+	// — an artifact of how goldmark splits the inline run. Skip it so
+	// the body iteration starts on real content.
+	for {
+		t, isText := afterMarker.(*ast.Text)
+		if !isText {
+			break
+		}
+		v := string(t.Segment.Value(source))
+		if strings.TrimSpace(v) != "" {
+			break
+		}
+		afterMarker = t.NextSibling()
+	}
+
+	return label, afterMarker, meta, true
+}
+
+// writeAdmonition emits the Confluence storage shape for an admonition
+// blockquote, dispatching on label. Confluence's storage uses TWO
+// shapes for panels (classic <ac:structured-macro> and modern ADF
+// <ac:adf-extension><ac:adf-node type="panel">), and the markdown
+// labels don't always have a 1:1 mapping to either:
+//
+//   - info/success/warning/error/panel/expand → classic structured-
+//     macro (the storage name from classicMarkdownToMacro maps the
+//     UI-aligned label to the legacy storage name);
+//   - note → ADF panel-type="note" (no classic equivalent for the
+//     purple note panel — it only exists as ADF);
+//   - decision → ADF decision-list with one decision-item;
+//   - tip/important/caution → resolved as aliases for success/note/
+//     error respectively.
+func (w *mdToCfWriter) writeAdmonition(label string, firstParaBodyStart ast.Node, bq *ast.Blockquote, meta map[string]string) {
+	switch label {
+	case "decision":
+		w.writeDecisionAdmonition(firstParaBodyStart, meta)
+	case "note", "important":
+		// No classic structured-macro produces the purple note panel.
+		// `important` is the GH-style alias.
+		w.writeAdfPanelAdmonition("note", firstParaBodyStart, bq, meta)
+	default:
+		// All other supported labels resolve to a classic structured-
+		// macro. classicMarkdownToMacro maps the UI-aligned markdown
+		// label back to the legacy storage `ac:name`.
+		macroName := classicMarkdownToMacro[label]
+		if macroName == "" {
+			macroName = label // expand, panel — same name on both sides
+		}
+		w.writeStructuredAdmonition(macroName, firstParaBodyStart, bq, meta)
+	}
+}
+
+// classicMarkdownToMacro is the inverse of classicMacroLabel — it maps
+// a markdown admonition label (UI-aligned name) back to the storage
+// `ac:name` Confluence expects on push. Includes back-compat aliases
+// that accept GH-style labels (tip / caution) and the older `tip` name
+// users may have learned for the green panel.
+var classicMarkdownToMacro = map[string]string{
+	"info":    "info",
+	"success": "tip",     // green panel — legacy storage name "tip"
+	"warning": "note",    // yellow panel — legacy storage name "note"
+	"error":   "warning", // red panel — legacy storage name "warning"
+	"panel":   "panel",
+	"expand":  "expand",
+	// aliases:
+	"tip":     "tip",     // GH spec & legacy gfl name for green
+	"caution": "warning", // GH spec name for red
+}
+
+// writeAdfPanelAdmonition emits an <ac:adf-extension> wrapping an
+// <ac:adf-node type="panel"> with the given panel-type. Used for the
+// purple "note" panel (which has no classic structured-macro form).
+// Any meta sidecar attributes are emitted as additional
+// <ac:adf-attribute key="…"> children — the wire shape Confluence uses
+// for ADF panel parameters.
+func (w *mdToCfWriter) writeAdfPanelAdmonition(panelType string, firstParaBodyStart ast.Node, bq *ast.Blockquote, meta map[string]string) {
+	w.sb.WriteString(`<ac:adf-extension>`)
+	w.sb.WriteString(`<ac:adf-node type="panel">`)
+	fmt.Fprintf(&w.sb, `<ac:adf-attribute key="panel-type">%s</ac:adf-attribute>`, xmlEscape(panelType))
+
+	// Additional meta keys travel as further <ac:adf-attribute> children
+	// (sorted for deterministic output).
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&w.sb, `<ac:adf-attribute key="%s">%s</ac:adf-attribute>`,
+			xmlAttrEscape(k), xmlEscape(meta[k]))
+	}
+
+	w.sb.WriteString(`<ac:adf-content>`)
+	w.writeAdmonitionBody(firstParaBodyStart, bq)
+	w.sb.WriteString(`</ac:adf-content>`)
+	w.sb.WriteString(`</ac:adf-node>`)
+	w.sb.WriteString(`</ac:adf-extension>`)
+}
+
+// writeStructuredAdmonition emits <ac:structured-macro ac:name="…"> with
+// any data-* meta keys as XML attributes on the macro element and any
+// other meta keys as <ac:parameter> children, wrapping the body in
+// <ac:rich-text-body>.
+func (w *mdToCfWriter) writeStructuredAdmonition(macroName string, firstParaBodyStart ast.Node, bq *ast.Blockquote, meta map[string]string) {
+	// Split meta keys into XML attributes (data-*) and parameters
+	// (everything else). Sort each list for deterministic output.
+	var attrKeys, paramKeys []string
+	for k := range meta {
+		if strings.HasPrefix(k, "data-") {
+			attrKeys = append(attrKeys, k)
+		} else {
+			paramKeys = append(paramKeys, k)
+		}
+	}
+	sort.Strings(attrKeys)
+	sort.Strings(paramKeys)
+
+	fmt.Fprintf(&w.sb, `<ac:structured-macro ac:name="%s"`, xmlAttrEscape(macroName))
+	for _, k := range attrKeys {
+		fmt.Fprintf(&w.sb, ` %s="%s"`, k, xmlAttrEscape(meta[k]))
+	}
+	w.sb.WriteByte('>')
+
+	for _, k := range paramKeys {
+		fmt.Fprintf(&w.sb, `<ac:parameter ac:name="%s">%s</ac:parameter>`,
+			xmlAttrEscape(k), xmlEscape(meta[k]))
+	}
+
+	w.sb.WriteString(`<ac:rich-text-body>`)
+	w.writeAdmonitionBody(firstParaBodyStart, bq)
+	w.sb.WriteString(`</ac:rich-text-body>`)
+	w.sb.WriteString(`</ac:structured-macro>`)
+}
+
+// writeAdmonitionBody fills the body wrapper of any structured-macro
+// admonition. The first paragraph's inline content (after the marker
+// and any sidecar) becomes one <p>; subsequent block children of the
+// blockquote (paragraphs, lists, ...) render normally.
+func (w *mdToCfWriter) writeAdmonitionBody(firstParaBodyStart ast.Node, bq *ast.Blockquote) {
+	if firstParaBodyStart != nil {
+		w.sb.WriteString("<p>")
+		for c := firstParaBodyStart; c != nil; c = c.NextSibling() {
+			w.writeInlineNode(c)
+		}
+		w.sb.WriteString("</p>")
+	}
+	for c := bq.FirstChild().NextSibling(); c != nil; c = c.NextSibling() {
+		w.writeBlock(c)
+	}
+}
+
+// writeDecisionAdmonition emits a single decision-item wrapped in an
+// <ac:adf-extension><ac:adf-node type="decision-list"> envelope. The
+// state defaults to DECIDED if the meta sidecar doesn't specify one.
+//
+// Decision content in storage is plain inline text (no <p> wrapping,
+// no nested blocks). We render only the inline content of the first
+// paragraph; any subsequent block children of the blockquote are
+// dropped because <ac:adf-content> for a decision-item can't carry
+// them. This is a documented limitation — multi-paragraph decisions
+// need to be authored in Confluence.
+func (w *mdToCfWriter) writeDecisionAdmonition(firstParaBodyStart ast.Node, meta map[string]string) {
+	state := meta["state"]
+	if state == "" {
+		state = "DECIDED"
+	}
+	w.sb.WriteString(`<ac:adf-extension>`)
+	w.sb.WriteString(`<ac:adf-node type="decision-list">`)
+	w.sb.WriteString(`<ac:adf-node type="decision-item">`)
+	fmt.Fprintf(&w.sb, `<ac:adf-attribute key="state">%s</ac:adf-attribute>`, xmlEscape(state))
+	w.sb.WriteString(`<ac:adf-content>`)
+	if firstParaBodyStart != nil {
+		for c := firstParaBodyStart; c != nil; c = c.NextSibling() {
+			w.writeInlineNode(c)
+		}
+	}
+	w.sb.WriteString(`</ac:adf-content>`)
+	w.sb.WriteString(`</ac:adf-node>`)
+	w.sb.WriteString(`</ac:adf-node>`)
+	w.sb.WriteString(`</ac:adf-extension>`)
 }
 
 // --- Helpers ----------------------------------------------------------------

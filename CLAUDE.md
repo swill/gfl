@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`gfl` is a standalone Go CLI that implements deterministic, bidirectional synchronisation between Markdown files tracked in a Git repository and pages in an Atlassian Confluence instance. It operates through Git hooks and the Confluence REST API — no CI, no external services, no LLMs, no Pandoc.
+`gfl` is a standalone Go CLI that implements deterministic, bidirectional synchronization between Markdown files tracked in a Git repository and pages in an Atlassian Confluence instance. It operates through Git hooks and the Confluence REST API — no CI, no external services, no LLMs, no Pandoc.
 
 It mirrors the hierarchical structure of a Confluence space rooted at a configured anchor page as a directory tree of Markdown files. Each managed `.md` file carries its Confluence identity in a front-matter block; a persistent local Git branch named `confluence` represents the last-known Confluence-side tree state. Pull and push are diff/merge operations between that branch and your working branch.
 
@@ -12,7 +12,7 @@ It mirrors the hierarchical structure of a Confluence space rooted at a configur
 
 - **Page identity lives with the file.** Every managed `.md` file has front-matter naming `confluence_page_id` (stable across renames and moves) and `confluence_version` (last seen Confluence version). There is no separate index file.
 - **Git is the reconciliation engine.** A local branch called `confluence` always represents the last-known Confluence state. Pull updates that branch, then `git merge`s it into the working branch. Push diffs the working branch against `confluence`, sends the result to Confluence, then fast-forwards `confluence` to match. Conflicts are ordinary `git merge` conflicts.
-- **Deterministic conversion.** Both directions are purpose-built Go lexers with canonical output. Given the same input, the output is always identical — primary defence against formatting drift loops.
+- **Deterministic conversion.** Both directions are purpose-built Go lexers with canonical output. Given the same input, the output is always identical — primary defense against formatting drift loops.
 - **Either side may be the source of truth.** Edits, renames, additions, and deletions on either Git or Confluence are reconciled on every push and pull.
 - **Self-recovery on partial push failure.** Failed operations re-appear in the next push's diff and are retried. There is no pending queue.
 - **Pure lexers.** No network, filesystem, or git access in the lexer package. Resolvers are injected at call sites.
@@ -135,7 +135,7 @@ Markdown images use paths relative to the `.md` file:
 ![schema](../_attachments/architecture/database-design/schema.png)
 ```
 
-`md_to_cf` recognises any path under `_attachments/` and emits `<ac:image><ri:attachment ri:filename="…"/></ac:image>` with just the leaf filename. Path computation lives in `tree.AttachmentDir`.
+`md_to_cf` recognizes any path under `_attachments/` and emits `<ac:image><ri:attachment ri:filename="…"/></ac:image>` with just the leaf filename. Path computation lives in `tree.AttachmentDir`.
 
 ### Slugification (`lexer/slugify.go`)
 
@@ -147,13 +147,18 @@ Page title → slug: lowercase, whitespace runs and underscores → single hyphe
 
 ### Title Stability Rule
 
-On a push-direction rename, the Confluence page title is updated **only if** `Slugify(currentTitle) != filenameSlug` (`lexer.TitleSlugsMatch`). If the new filename slugifies to the same value as the current Confluence title, the title is preserved verbatim — preventing capitalisation and punctuation drift on no-op renames.
+On a push-direction rename, the Confluence page title is updated **only if** `Slugify(currentTitle) != filenameSlug` (`lexer.TitleSlugsMatch`). If the new filename slugifies to the same value as the current Confluence title, the title is preserved verbatim — preventing capitalization and punctuation drift on no-op renames.
 
-Developers who need specific capitalisation set it in Confluence and let pull propagate it; they should not try to encode capitalisation in filenames.
+Developers who need specific capitalization set it in Confluence and let pull propagate it; they should not try to encode capitalization in filenames.
 
 ## Lexer
 
-Pure functions — no I/O. The orchestrator injects `PageResolver` and `AttachmentResolver` for cross-page links and attachment references. The full construct mapping lives alongside the implementations in `lexer/cf_to_md.go` and `lexer/md_to_cf.go`.
+Pure functions — no I/O. The orchestrator injects four resolver interfaces:
+
+- `PageResolver` and `AttachmentRefResolver` (used by `cf_to_md`) for cross-page links and attachment references on the pull side.
+- `MdPageResolver` and `MdAttachmentResolver` (used by `md_to_cf`) for the inverse on the push side; the attachment resolver also records every resolved attachment so push can upload the corresponding binary.
+
+The full construct mapping lives alongside the implementations in `lexer/cf_to_md.go` and `lexer/md_to_cf.go`.
 
 ### Front-matter (`lexer/frontmatter.go`)
 
@@ -163,21 +168,53 @@ Pure functions — no I/O. The orchestrator injects `PageResolver` and `Attachme
 
 `Normalise(md string) string` returns Markdown in canonical form. Both lexer outputs pass through it before being returned. UTF-8/LF/single trailing newline; ATX headings; `*`/`**`/`~~` emphasis; `-` bullets; `1.` ordered items with 2-space indent; triple-backtick code with lowercased language tag; inline links and images; GFM pipe tables (alignment colons preserved); `> ` blockquotes; `---` thematic break. Both hard (`\\\n`) and soft line breaks are preserved as `\\\n` — Confluence relies on significant line breaks for layout. A leading front-matter block is preserved at the top in canonical form.
 
+GFM admonitions (`> [!INFO]\n> body` and friends) are recognized and emitted in canonical form by the normalizer too — including the `<!--gfl:meta …-->` sidecar that may follow the marker (see "Inline metadata sidecar" below).
+
 `Normalise` is idempotent: `Normalise(Normalise(x)) == Normalise(x)`. Malformed front-matter falls through to body-only normalisation rather than erroring.
 
 ### cf_to_md and md_to_cf
 
 - `cf_to_md` parses storage XML via `encoding/xml`.
 - `md_to_cf` uses `goldmark` with the GFM extension; backslash escapes are resolved to literals before XML encoding to prevent escape accumulation on round trips.
-- Confluence code macros are emitted as `<ac:structured-macro ac:name="code">…</ac:structured-macro>` with a `language` parameter and a CDATA `plain-text-body`.
-- Cross-page links use `<ac:link><ri:page …/>…</ac:link>`; attachment images use `<ac:image><ri:attachment ri:filename="…"/></ac:image>`.
+- Confluence code macros are emitted as `<ac:structured-macro ac:name="code">…</ac:structured-macro>` with a `language` parameter and a CDATA `plain-text-body`. Trailing newlines are stripped before CDATA-wrapping (Confluence preserves CDATA byte-for-byte; a stray `\n` would surface as a phantom blank line at the end of every code block).
+- Cross-page links use `<ac:link><ri:page …/>…</ac:link>`; attachment images use `<ac:image><ri:attachment ri:filename="…"/></ac:image>`. Both directions emit paths *relative to the source `.md`'s directory* (not repo-rooted) so the markdown renders correctly in any viewer.
+- External links and images preserve non-trivial attributes (`target`, `rel`, image `width` / `layout` / `align`) via the inline metadata sidecar (see below).
+- Block-level `<ac:image>` (the form Confluence emits when an image carries layout/sizing attributes) renders as a standalone Markdown image; styling attributes travel via the meta sidecar.
 - Tables extract/emit alignment via `style="text-align: …"` on `<th>`/`<td>`.
 - Raw HTML blocks not matching the fence format are wrapped in `<p>` and escaped — we never emit `<ac:structured-macro ac:name="html">` (many Confluence Cloud instances disable it).
 - `<ac:structured-macro ac:name="toc">` is dropped; unknown `<ac:structured-macro>` is fence-preserved.
 
-### Confluence-Native Fence (`lexer/fence.go`)
+### Construct Mapping
 
-Constructs Markdown can't represent (Jira macros, user mentions, panels, layouts, unknown structured macros) are preserved as a single HTML-comment block with base64-encoded storage XML:
+The pull side translates well-known Confluence constructs into editable Markdown shapes; push reverses the mapping. Constructs without a clean Markdown representation are fence-preserved (see "Fences" below) so they survive untouched.
+
+**GFM admonitions.** Confluence's six built-in panel styles plus expand and decision render as GitHub-flavoured admonition blockquotes. The body stays editable as plain markdown; any `<ac:parameter>` children round-trip via the inline metadata sidecar. Crucially, **Confluence's classic storage names are LEGACY and do not match the panel labels shown in today's editor UI** — the markdown side uses the UI-aligned names so authoring matches what users see:
+
+| UI label (today) | Visual style | Storage form on pull          | Markdown shape   |
+|------------------|--------------|-------------------------------|------------------|
+| Info             | blue         | `ac:name="info"` or ADF panel-type=info       | `> [!INFO]`      |
+| Note             | purple       | ADF panel-type=note (no classic equivalent)   | `> [!NOTE]`      |
+| Success          | green        | `ac:name="tip"` or ADF panel-type=success     | `> [!SUCCESS]`   |
+| Warning          | yellow       | `ac:name="note"` or ADF panel-type=warning    | `> [!WARNING]`   |
+| Error            | red          | `ac:name="warning"` or ADF panel-type=error   | `> [!ERROR]`     |
+| Custom panel     | user-defined | `ac:name="panel"` with parameters             | `> [!PANEL]<!--gfl:meta bgColor="..." panelIcon="..."-->` |
+| Expand           | collapsed    | `ac:name="expand"` with `title` parameter     | `> [!EXPAND]<!--gfl:meta title="..."-->` |
+| Decision         | tracked item | ADF `<ac:adf-node type="decision-list">`      | `> [!DECISION]` (one per item) |
+
+`classicMacroLabel` (in `cf_to_md.go`) and `classicMarkdownToMacro` (in `md_to_cf.go`) are the authoritative tables for the storage↔markdown conversion. ADF panel-types pass through untouched (their naming is sane).
+
+On push, a label that has both classic and ADF forms always emits classic (simpler, more compact); `[!NOTE]` (purple) is the exception — there is no classic structured-macro for it, so it always emits ADF. Confluence may re-save either form on its next save; the markdown stays stable because both shapes converge on the same label.
+
+Backward-compat aliases accepted on push (never emitted on pull):
+- `[!TIP]` → `[!SUCCESS]` (legacy gfl name and GH spec)
+- `[!IMPORTANT]` → `[!NOTE]` (GH spec)
+- `[!CAUTION]` → `[!ERROR]` (GH spec)
+
+### Confluence-Native Fences (`lexer/fence.go`)
+
+Constructs Markdown can't represent at all (Jira macros, status macros, custom panels with structured parameters, ADF decision-list items in unusual positions, layouts, unknown structured macros) are preserved as base64-encoded HTML wrappers around the original storage XML. Two shapes — block and inline — depending on context.
+
+**Block fence.** A multi-line HTML comment, used at block level:
 
 ```
 <!-- gfl:storage:block:v1:b64
@@ -185,7 +222,32 @@ Constructs Markdown can't represent (Jira macros, user mentions, panels, layouts
 -->
 ```
 
-`DecodeBlockFence(EncodeBlockFence(x)) == x` for arbitrary XML (property-tested).
+**Inline fence.** A single self-closing custom-element tag, used inside paragraphs (emoticons, inline `<ac:structured-macro>` instances like status badges, `<ac:link><ri:user>` mentions):
+
+```
+<gfl-fence data-v1-b64="BASE64DATA"/>
+```
+
+The custom-element form is required for inline use because CommonMark's HTML-block detection treats any line beginning with `<!--` as the start of a multi-line HTML block — which would silently swallow paragraphs that begin with a fence and any subsequent fence on the same line. Custom-element tags don't trigger that detection unless followed only by whitespace, so a paragraph mixing prose and fences stays a paragraph.
+
+`DecodeBlockFence(EncodeBlockFence(x)) == x` and `DecodeInlineFence(EncodeInlineFence(x)) == x` for arbitrary XML (property-tested).
+
+### Inline Metadata Sidecar (`lexer/meta.go`)
+
+A small HTML comment that travels immediately after a known inline construct (image, external link, admonition marker) carrying attributes that have no native Markdown shape:
+
+```
+![alt](path.png)<!--gfl:meta ac:width="1006" ac:layout="center"-->
+[example](https://example.com)<!--gfl:meta target="_blank" rel="noopener"-->
+> [!INFO]<!--gfl:meta icon="true" bgColor="#ffeb3b"-->
+> body
+```
+
+Adjacency is strict — the comment must be the immediate next sibling of the construct it decorates. The pull-direction emission always emits them strictly adjacent; manual edits that insert whitespace will detach the sidecar, which is then treated as stray and silently dropped on push.
+
+Keys with the `data-` prefix become XML attributes on the parent macro element on push (`data-layout="wide"` on expand); other keys become `<ac:parameter>` children.
+
+`EncodeMeta` / `DecodeMeta` / `IsMeta` are the public helpers.
 
 ### Round-Trip Idempotency
 
@@ -230,11 +292,12 @@ Triggered by pre-push and direct invocation.
 3. `gitutil.DiffBranches(confluenceBranch, "HEAD", "*.md")` with rename detection. If empty, "no changes to push" and exit.
 4. Fetch the Confluence tree once up front so step 7's canonicalisation can run.
 5. Sort the diffs: `index.md` files first (parents before children), then non-index files, then renames, then deletes.
-6. For each diff, dispatch on action:
+6. For each diff, dispatch on action. Every body conversion uses `pushResolvers(localPath, cfg, ct, pm)` to build the `MdPageResolver` + `MdAttachmentResolver` pair — the page resolver maps Markdown link targets to `<ac:link><ri:page>` references, the attachment resolver detects paths under `cfg.AttachmentsDir` and records every resolved attachment for upload.
    - **Added**: read body from `HEAD`. If front-matter already names a `page_id` that genuinely exists, treat as adopt-then-update; otherwise `POST /content`. Auto-create intermediate parent pages via `ensurePushParents`, writing intermediate `index.md` files to the working tree so they land in the user's next commit (and so subsequent diffs in this run can read their front-matter).
    - **Modified**: read `page_id` from the `confluence` branch's copy of the file (the canonical bridge). `GET /content/{id}` for current version, then `PUT` with new body. On 409, refetch and retry once.
    - **Deleted**: read `page_id` from the `confluence` branch's old-path copy. `DELETE /content/{id}`; 404 treated as success.
    - **Renamed**: read `page_id` from the `confluence` branch's old path. Apply Title Stability Rule for the new title. Update parent if the directory changed. `PUT` with new title, body, and parent.
+   - After each successful add / modify / rename, `uploadResolvedAttachments` walks the attachment resolver's collected list, reads each binary from disk, and `POST`s it to `/content/{pageID}/child/attachment`. Confluence rejects byte-identical re-uploads with HTTP 400 ("same file name") — `api.IsAttachmentUnchanged` recognizes that specific failure and treats it as a silent no-op rather than a warning.
 7. **Canonicalise** each successful op's body (`canonicalisePushOps`): re-render the storage XML we just sent through `CfToMd` with the same resolvers a future pull would use. Without this step, lossy steps in `CfToMd` (e.g. HTML whitespace collapse) would surface as phantom Confluence-side changes on the next pull and conflict with concurrent main-side edits on the same line.
 8. **Advance the `confluence` branch on the working branch** (`advanceConfluenceBranch`):
    - Stash if the working tree is dirty (typically clean during a pre-push hook, but direct invocation may not be).
@@ -282,7 +345,7 @@ Basic Auth. See `api/content.go` and `api/attachments.go` for the exact endpoint
 - `DeletePage(id)` — cascades to descendants server-side
 - `GetAttachments(pageID, filename?)`, `DownloadAttachment(path)`, `UploadAttachment(pageID, filename, data)`
 
-`api.IsConflict` / `api.IsNotFound` classify errors from `APIError`.
+`api.IsConflict` / `api.IsNotFound` / `api.IsAttachmentUnchanged` classify errors from `APIError`. The last is specifically for Confluence's HTTP 400 response on byte-identical attachment re-uploads — push treats it as success rather than a warning.
 
 ## CLI Reference
 
@@ -308,3 +371,6 @@ Basic Auth. See `api/content.go` and `api/attachments.go` for the exact endpoint
 9. **Credentials never appear in logs, flags, or commits.** Env vars only.
 10. **Lexers are pure.** No network/filesystem/git access in `lexer/`. Resolvers are injected.
 11. **Title Stability Rule.** A push-side rename updates the Confluence title only if `Slugify(currentTitle) != filenameSlug`.
+12. **Markdown labels are UI-aligned, not storage-aligned.** Confluence's classic `<ac:structured-macro ac:name="…">` storage names are legacy: `tip` is today's *success* panel, `note` is *warning*, `warning` is *error*. The markdown side uses the names users see in the editor today (`[!SUCCESS]`, `[!WARNING]`, `[!ERROR]`), translated via `classicMacroLabel` / `classicMarkdownToMacro`. Authoring a `[!WARNING]` produces the yellow warning panel, not the red error panel.
+13. **Inline metadata is sidecar-shaped, not embedded.** Image / link / admonition attributes that have no native Markdown shape travel in a `<!--gfl:meta key="value"-->` comment immediately adjacent to the construct they decorate. Strict adjacency: a stray sidecar (non-adjacent) is silently dropped on push.
+14. **Push uploads attachments referenced by markdown.** Every image whose src resolves under `cfg.AttachmentsDir` is sent to `POST /content/{id}/child/attachment` after the page write. Byte-identical re-uploads (Confluence HTTP 400) are treated as success. Failures are warnings; the next push retries.
