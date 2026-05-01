@@ -289,8 +289,6 @@ Get the code the lexer sees for a Confluence page by hitting this URL.
 ```
 https://<your-company>.atlassian.net/wiki/rest/api/content/<page-id>?expand=body.storage
 ```
-```
-```
 
 ## License
 
