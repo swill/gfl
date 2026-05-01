@@ -280,6 +280,18 @@ See `CLAUDE.md` for the design rationale, sync invariants, and the round-trip id
 
 Release binaries are built via the `Makefile` `release` target and published as GitHub release artifacts.
 
+### troubleshooting
+
+If you are seeing issues with the content being changed during a round-trip of a `gfl pull` and `gfl push`, you can review the actual raw content of the confluence page to see why it is not being handled by the lexer correctly.
+
+Get the code the lexer sees for a Confluence page by hitting this URL.
+
+```
+https://<your-company>.atlassian.net/wiki/rest/api/content/<page-id>?expand=body.storage
+```
+```
+```
+
 ## License
 
 See [LICENSE](LICENSE) for details.
